@@ -9,16 +9,34 @@
 - Maintain mark prices
 - Maintain index prices sourced from the oracle layer
 - Calculate unrealized PnL from mark prices
+- Own the liquidation center queue, insurance fund, and ADL fallback metrics for perp trading
+
+Current implementation note:
+
+- `PerpEngine` now exposes a concrete `LiquidationCenter`
+- `asset_id` is `u64`, `price` is scaled `u256`, and `amount` is `u128`
 
 ## Interface
 
 ```zig
 pub const PerpEngine = struct {
+    liquidation_center: LiquidationCenter,
+
     pub fn init(alloc: std.mem.Allocator) PerpEngine
-    pub fn calcFundingRate(self: *PerpEngine, asset_id: u32, state: *GlobalState) FundingRate
-    pub fn settleFunding(self: *PerpEngine, asset_id: u32, state: *GlobalState) !FundingEvent
-    pub fn updateMarkPrice(self: *PerpEngine, asset_id: u32, state: *GlobalState) void
-    pub fn unrealizedPnl(pos: *const Position, mark_px: Price) Quantity
+    pub fn calcFundingRate(self: *PerpEngine, asset_id: AssetId, state: *GlobalState) FundingRate
+    pub fn settleFunding(self: *PerpEngine, asset_id: AssetId, state: *GlobalState) !FundingEvent
+    pub fn updateMarkPrice(self: *PerpEngine, asset_id: AssetId, state: *GlobalState) void
+    pub fn updateMarkPriceFromBook(self: *PerpEngine, asset_id: AssetId, best_bid: ?Price, best_ask: ?Price, state: *GlobalState) void
+    pub fn unrealizedPnl(pos: *const Position, mark_px: Price) SignedAmount
+};
+
+pub const LiquidationCenter = struct {
+    insurance_fund: SignedAmount,
+    adl_invocations: u64,
+
+    pub fn enqueue(self: *LiquidationCenter, event: LiquidationEvent) !void
+    pub fn queued(self: *const LiquidationCenter) []const LiquidationEvent
+    pub fn execute(self: *LiquidationCenter, event: LiquidationEvent, entry_price: Price) LiquidationOutcome
 };
 ```
 

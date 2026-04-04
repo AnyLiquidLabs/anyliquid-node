@@ -11,28 +11,35 @@
 - Execute liquidation against the insurance fund
 - Trigger ADL when the insurance fund is exhausted
 
+Current implementation note:
+
+- `RiskEngine` now owns in-memory account ledgers and position maps
+- liquidation events are enqueued into `PerpEngine.liquidation_center`
+- `asset_id` is `u64`, `price` is scaled `u256`, and `amount` is `u128`
+
 ## Interface
 
 ```zig
 pub const RiskEngine = struct {
-    allocator:      std.mem.Allocator,
-    insurance_fund: Quantity,
+    allocator: std.mem.Allocator,
+    perp:      *PerpEngine,
 
-    pub fn init(alloc: std.mem.Allocator) RiskEngine
+    pub fn init(perp: *PerpEngine, alloc: std.mem.Allocator) RiskEngine
     pub fn deinit(self: *RiskEngine) void
+    pub fn setBalance(self: *RiskEngine, addr: Address, balance: Amount) !void
 
     pub fn onFill(
         self: *RiskEngine,
-        taker: *const OrderEntry,
-        maker: *const OrderEntry,
-        fill_size: Quantity,
+        taker: *const Order,
+        maker: *const Order,
+        fill_size: Amount,
         fill_px: Price,
         state: *GlobalState,
     ) !void
 
     pub fn checkLiquidations(self: *RiskEngine, state: *GlobalState) ![]LiquidationEvent
     pub fn liquidate(self: *RiskEngine, event: LiquidationEvent, state: *GlobalState) !void
-    pub fn adl(self: *RiskEngine, asset_id: u32, side: Side, state: *GlobalState) !void
+    pub fn adl(self: *RiskEngine, asset_id: AssetId, side: Side, state: *GlobalState) !void
     pub fn getAccountHealth(self: *RiskEngine, addr: Address, state: *GlobalState) AccountHealth
 };
 ```
@@ -50,7 +57,7 @@ pub fn isolatedMarginAvailable(pos: *Position) Quantity {
     return pos.isolated_margin + pos.unrealized_pnl;
 }
 
-pub fn maintenanceMarginRequired(pos: *Position, mark_px: Price) Quantity {
+pub fn maintenanceMarginRequired(pos: *Position, mark_px: Price) SignedAmount {
     return pos.size * mark_px * MAINTENANCE_MARGIN_RATE;
 }
 ```
@@ -63,18 +70,20 @@ pub fn checkLiquidations(self: *RiskEngine, state: *GlobalState) ![]LiquidationE
 
     for (state.accounts.values()) |*account| {
         for (account.positions.values()) |*pos| {
-            const mark_px = state.oracle_prices.get(pos.asset_id);
+            const mark_px = perp.markPrice(pos.asset_id);
             const mm_req = maintenanceMarginRequired(pos, mark_px);
             const margin = availableMargin(account, pos);
 
             if (margin < mm_req) {
-                try events.append(.{
+                const event = .{
                     .user = account.address,
                     .asset_id = pos.asset_id,
                     .size = pos.size,
                     .side = pos.side,
                     .mark_px = mark_px,
-                });
+                };
+                try perp.liquidation_center.enqueue(event);
+                try events.append(event);
             }
         }
     }
@@ -86,16 +95,10 @@ pub fn liquidate(self: *RiskEngine, event: LiquidationEvent, state: *GlobalState
     const pnl = calcPnl(event, close_px);
 
     if (pnl > 0) {
-        self.insurance_fund += pnl;
+        _ = perp.liquidation_center.execute(event, entry_price);
     } else {
-        if (self.insurance_fund >= -pnl) {
-            self.insurance_fund += pnl;
-        } else {
-            try self.adl(event.asset_id, event.side.opposite(), state);
-        }
+        _ = perp.liquidation_center.execute(event, entry_price);
     }
-
-    state.accounts.removePosition(event.user, event.asset_id);
 }
 ```
 

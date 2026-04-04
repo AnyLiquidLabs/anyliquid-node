@@ -10,6 +10,7 @@ The shared layer contains no business ownership. It defines contracts, message f
 src/shared/
 ├── types.zig
 ├── protocol.zig
+├── serialization.zig
 ├── crypto.zig
 └── fixed_point.zig
 ```
@@ -164,6 +165,24 @@ pub const L2BookUpdate = struct {
     asks:        []Level,
     is_snapshot: bool,
 };
+```
+
+Current scaffold implementation note:
+
+- `serialization.zig` provides a deterministic binary codec used by the harness and in-process IPC loop.
+- The long-term production target remains a dedicated MessagePack adapter as described in [`../../references/dependencies.md`](../../references/dependencies.md).
+
+## `serialization.zig`
+
+```zig
+pub fn encodeFrame(alloc: std.mem.Allocator, msg_id: u32, msg_type: MsgType, payload: []const u8) ![]u8
+pub fn decodeFrame(bytes: []const u8) !Frame
+
+pub fn encodeActionRequest(alloc: std.mem.Allocator, req: ActionRequest) ![]u8
+pub fn decodeActionRequest(alloc: std.mem.Allocator, bytes: []const u8) !ActionRequest
+
+pub fn encodeActionAck(alloc: std.mem.Allocator, ack: ActionAck) ![]u8
+pub fn decodeActionAck(alloc: std.mem.Allocator, bytes: []const u8) !ActionAck
 ```
 
 ## `crypto.zig`

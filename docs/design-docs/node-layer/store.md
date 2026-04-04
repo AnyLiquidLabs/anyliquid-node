@@ -6,6 +6,7 @@
 ## Responsibilities
 
 - Persist committed blocks in an append-only WAL
+- Persist accepted pending transactions before they are admitted to the mempool
 - Maintain a sparse Merkle tree for account and position state
 - Maintain indexed history for fills, funding, and orders
 - Recover memory state from persistent data after restart
@@ -16,6 +17,9 @@
 pub const Store = struct {
     pub fn init(cfg: StoreConfig, alloc: std.mem.Allocator) !Store
     pub fn deinit(self: *Store) void
+    pub fn appendPendingTransaction(self: *Store, tx: Transaction) !void
+    pub fn removePendingTransactions(self: *Store, txs: []const Transaction) !void
+    pub fn pendingTransactions(self: *const Store) []const Transaction
     pub fn commitBlock(self: *Store, block: Block, state_diff: StateDiff) !void
     pub fn getBlock(self: *Store, height: u64) !?Block
     pub fn getStateProof(self: *Store, key: StateKey) !MerkleProof
@@ -36,6 +40,11 @@ pub const SMT = struct {
 ```
 
 Leaf keys are `hash(address ++ asset_id)`. Leaf values are the encoded account or position state.
+
+Current scaffold implementation note:
+
+- The current store uses append-only binary logs for `pending-txs.bin` and `blocks.bin`.
+- Confirmed pending transactions rewrite the pending log so restart recovery matches the in-memory mempool boundary.
 
 ## Test Harness
 

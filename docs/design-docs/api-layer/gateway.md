@@ -10,29 +10,32 @@
 - Subscribe to Node event streams and forward them to the WebSocket server and local cache
 - Reconnect automatically and expose connection health
 
+Current scaffold implementation note:
+
+- The live production socket client is not built yet.
+- The executable harness path uses an in-process framed transport with `InMemoryNodeHarness`, which exercises the same request/response and pushed-event loop as the external gateway boundary.
+
 ## Interface
 
 ```zig
 pub const Gateway = struct {
     allocator: std.mem.Allocator,
-    conn:      IpcConn,
-    on_event:  EventCallback,
+    on_event:  EventSink,
+    transport: ?Transport,
 
-    pub fn init(cfg: GatewayConfig, on_event: EventCallback, alloc: std.mem.Allocator) !Gateway
+    pub fn init(cfg: GatewayConfig, on_event: EventSink, alloc: std.mem.Allocator) !Gateway
     pub fn deinit(self: *Gateway) void
 
-    pub fn sendAction(
-        self: *Gateway,
-        action: ActionPayload,
-        nonce: u64,
-        signature: EIP712Signature,
-    ) !ActionAck
+    pub fn sendAction(self: *Gateway, req: ActionRequest) !ActionAck
 
     pub fn query(self: *Gateway, req: QueryRequest) !QueryResponse
     pub fn isConnected(self: *Gateway) bool
 };
 
-pub const EventCallback = *const fn (event: NodeEvent) void;
+pub const EventSink = struct {
+    ctx: ?*anyopaque,
+    callback: *const fn (?*anyopaque, event: NodeEvent) void,
+};
 ```
 
 ## IPC Frame Protocol

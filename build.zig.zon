@@ -1,0 +1,16 @@
+.{
+    .fingerprint = 0x6af8320df708b6e2,
+    .name = .anyliquid_node,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+        "ARCHITECTURE.md",
+        "AGENTS.md",
+        "docs",
+    },
+}
