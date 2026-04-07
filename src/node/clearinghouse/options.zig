@@ -131,7 +131,7 @@ pub const OptionsClearingUnit = struct {
                     @as(f64, @floatFromInt(spot_price)),
                     @as(f64, @floatFromInt(spec.strike)),
                     0.05, // risk-free rate
-                    0.3,  // implied volatility (30%)
+                    0.3, // implied volatility (30%)
                     time_to_expiry / (365.0 * 24.0 * 3600.0), // convert to years
                     spec.option_type,
                 );

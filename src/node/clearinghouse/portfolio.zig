@@ -28,11 +28,9 @@ pub const PortfolioMargin = struct {
         collateral_oracle_price: shared.types.Price,
         ltv: f64,
     ) shared.types.Quantity {
-        return @intFromFloat(
-            @as(f64, @floatFromInt(collateral_balance)) *
+        return @intFromFloat(@as(f64, @floatFromInt(collateral_balance)) *
             @as(f64, @floatFromInt(collateral_oracle_price)) *
-            ltv
-        );
+            ltv);
     }
 
     /// Compute borrow oracle price - three-way median for manipulation resistance.
@@ -109,11 +107,9 @@ pub const PortfolioMargin = struct {
         const liquidation_threshold = 0.5 + 0.5 * ltv;
 
         const min_cap = @min(borrow_cap, @min(portfolio_balance, supply_cap));
-        const capped_value: shared.types.Quantity = @intFromFloat(
-            @as(f64, @floatFromInt(min_cap)) *
+        const capped_value: shared.types.Quantity = @intFromFloat(@as(f64, @floatFromInt(min_cap)) *
             @as(f64, @floatFromInt(borrow_oracle_price)) *
-            liquidation_threshold
-        );
+            liquidation_threshold);
 
         return @intCast(@as(i256, @intCast(portfolio_balance)) + @as(i256, @intCast(capped_value)));
     }

@@ -20,7 +20,7 @@ pub const Clearinghouse = struct {
 
     pub fn init(cfg: types.ClearinghouseConfig, alloc: std.mem.Allocator) !Clearinghouse {
         var margin_engine = margin_mod.MarginEngine.init(.{});
-        
+
         return .{
             .allocator = alloc,
             .router = router_mod.InstrumentRouter.init(alloc, cfg.fee_config),
@@ -105,7 +105,12 @@ pub const Clearinghouse = struct {
         state: *const margin_mod.GlobalState,
     ) !types.TransferEvent {
         return self.transfer_engine.executeIntraMaster(
-            from_index, to_index, asset_id, amount, master, state,
+            from_index,
+            to_index,
+            asset_id,
+            amount,
+            master,
+            state,
         );
     }
 
@@ -119,7 +124,11 @@ pub const Clearinghouse = struct {
         state: *const margin_mod.GlobalState,
     ) !types.TransferEvent {
         return self.transfer_engine.executeDeposit(
-            to_index, asset_id, amount, master, state,
+            to_index,
+            asset_id,
+            amount,
+            master,
+            state,
         );
     }
 
@@ -134,7 +143,12 @@ pub const Clearinghouse = struct {
         state: *const margin_mod.GlobalState,
     ) !types.TransferEvent {
         return self.transfer_engine.executeWithdrawal(
-            from_index, asset_id, amount, destination, master, state,
+            from_index,
+            asset_id,
+            amount,
+            destination,
+            master,
+            state,
         );
     }
 
@@ -148,7 +162,11 @@ pub const Clearinghouse = struct {
         has_active_builder_code: bool,
     ) !types.AccountModeChangedEvent {
         return self.mode_manager.setAccountMode(
-            master, new_mode, now_ms, weighted_volume, has_active_builder_code,
+            master,
+            new_mode,
+            now_ms,
+            weighted_volume,
+            has_active_builder_code,
         );
     }
 

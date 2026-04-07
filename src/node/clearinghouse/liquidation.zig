@@ -313,7 +313,6 @@ test "liquidation surplus - credited to insurance fund" {
 }
 
 test "ADL ranking - higher profit x leverage reduced first" {
-
     const pos_a = types.Position{
         .instrument_id = 1,
         .kind = .{ .perp = .{
