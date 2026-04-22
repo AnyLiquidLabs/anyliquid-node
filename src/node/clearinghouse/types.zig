@@ -119,6 +119,8 @@ pub const Fill = struct {
     maker_order_id: u64,
     price: shared.types.Price,
     size: shared.types.Quantity,
+    taker_leverage: u8 = 1,
+    maker_leverage: u8 = 1,
     taker_is_buy: bool,
     timestamp: i64,
 };
@@ -386,6 +388,13 @@ pub fn initialMargin(size: shared.types.Quantity, mark_px: shared.types.Price, l
     return shared.fixed_point.mulPriceQty(mark_px, size) / @as(shared.types.Quantity, @intCast(leverage));
 }
 
+pub fn instrumentMaxLeverage(kind: InstrumentKind, fallback: u8) u8 {
+    return switch (kind) {
+        .perp => |spec| spec.max_leverage,
+        else => fallback,
+    };
+}
+
 pub fn maintenanceMarginRate(max_leverage: u8) f64 {
     return 1.0 / (@as(f64, @floatFromInt(max_leverage)) * 2.0);
 }
@@ -439,6 +448,12 @@ fn normalCdf(x: f64) f64 {
     return 0.5 * (1.0 + std.math.erf(x / @sqrt(2.0)));
 }
 
+const test_btc_mark = shared.fixed_point.priceFromWhole(100_000 * USDC);
+const test_btc_entry_low = shared.fixed_point.priceFromWhole(50_000 * USDC);
+const test_btc_entry_high = shared.fixed_point.priceFromWhole(90_000 * USDC);
+const test_btc_mark_up = shared.fixed_point.priceFromWhole(60_000 * USDC);
+const test_btc_mark_down = shared.fixed_point.priceFromWhole(40_000 * USDC);
+
 test "deriveSubAccountAddress - deterministic and unique" {
     const master_a = [_]u8{0xAA} ** 20;
     const a0 = deriveSubAccountAddress(master_a, 0);
@@ -448,7 +463,7 @@ test "deriveSubAccountAddress - deterministic and unique" {
 }
 
 test "initial margin formula - notional / leverage" {
-    try std.testing.expectEqual(@as(shared.types.Quantity, 10_000), initialMargin(1, 100_000, 10));
+    try std.testing.expectEqual(10_000 * USDC, initialMargin(1, test_btc_mark, 10));
 }
 
 test "maintenance margin rate - half of im rate at max leverage" {
@@ -477,11 +492,11 @@ test "ADL ranking - higher profit x leverage reduced first" {
         .user = [_]u8{1} ** 20,
         .size = 1,
         .side = .long,
-        .entry_price = 50_000,
+        .entry_price = test_btc_entry_low,
         .realized_pnl = 0,
         .leverage = 10,
         .margin_mode = .isolated,
-        .isolated_margin = 1000,
+        .isolated_margin = 1_000 * USDC,
         .funding_index = 0,
         .delta = 0,
         .gamma = 0,
@@ -501,18 +516,18 @@ test "ADL ranking - higher profit x leverage reduced first" {
         .user = [_]u8{2} ** 20,
         .size = 1,
         .side = .long,
-        .entry_price = 90_000,
+        .entry_price = test_btc_entry_high,
         .realized_pnl = 0,
         .leverage = 20,
         .margin_mode = .isolated,
-        .isolated_margin = 5000,
+        .isolated_margin = 5_000 * USDC,
         .funding_index = 0,
         .delta = 0,
         .gamma = 0,
         .vega = 0,
         .theta = 0,
     };
-    const mark: shared.types.Price = 100_000;
+    const mark: shared.types.Price = test_btc_mark;
     try std.testing.expect(adlRank(&pos_a, mark) > adlRank(&pos_b, mark));
 }
 
@@ -536,19 +551,19 @@ test "Position unrealizedPnl for long" {
         .user = [_]u8{1} ** 20,
         .size = 1,
         .side = .long,
-        .entry_price = 50_000,
+        .entry_price = test_btc_entry_low,
         .realized_pnl = 0,
         .leverage = 10,
         .margin_mode = .isolated,
-        .isolated_margin = 1000,
+        .isolated_margin = 1_000 * USDC,
         .funding_index = 0,
         .delta = 0,
         .gamma = 0,
         .vega = 0,
         .theta = 0,
     };
-    try std.testing.expect(pos.unrealizedPnl(60_000) > 0);
-    try std.testing.expect(pos.unrealizedPnl(40_000) < 0);
+    try std.testing.expect(pos.unrealizedPnl(test_btc_mark_up) > 0);
+    try std.testing.expect(pos.unrealizedPnl(test_btc_mark_down) < 0);
 }
 
 test "Position notional" {
@@ -565,18 +580,18 @@ test "Position notional" {
         .user = [_]u8{1} ** 20,
         .size = 1,
         .side = .long,
-        .entry_price = 50_000,
+        .entry_price = test_btc_entry_low,
         .realized_pnl = 0,
         .leverage = 10,
         .margin_mode = .isolated,
-        .isolated_margin = 1000,
+        .isolated_margin = 1_000 * USDC,
         .funding_index = 0,
         .delta = 0,
         .gamma = 0,
         .vega = 0,
         .theta = 0,
     };
-    try std.testing.expectEqual(@as(shared.types.Quantity, 100_000), pos.notional(100_000));
+    try std.testing.expectEqual(100_000 * USDC, pos.notional(test_btc_mark));
 }
 
 test "Position canRemoveMargin" {

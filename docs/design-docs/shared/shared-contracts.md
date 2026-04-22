@@ -44,6 +44,7 @@ pub const Order = struct {
     is_buy:      bool,
     price:       Price,
     size:        Quantity,
+    leverage:    u8,
     order_type:  OrderType,
     cloid:       ?[16]u8,
     nonce:       u64,
@@ -86,7 +87,7 @@ pub const Position = struct {
     entry_price:      Price,
     unrealized_pnl:   i64,
     isolated_margin:  Quantity,
-    leverage:         u8,
+    leverage:         u8,       // requested at open/increase time; persisted on the position
 };
 
 pub const AccountState = struct {

@@ -22,8 +22,8 @@ pub const PerpClearingUnit = struct {
     pub fn settle(self: *PerpClearingUnit, fill: types.Fill, taker_sub: *account.SubAccount, maker_sub: *account.SubAccount, state: *const margin_mod.GlobalState) !types.FillSettledEvent {
         _ = self;
         _ = state;
-        applyPerpFill(fill, taker_sub, true) catch {};
-        applyPerpFill(fill, maker_sub, false) catch {};
+        try applyPerpFill(fill, taker_sub, true);
+        try applyPerpFill(fill, maker_sub, false);
 
         return .{
             .fill = fill,
@@ -53,24 +53,26 @@ pub const PerpClearingUnit = struct {
 
 fn applyPerpFill(fill: types.Fill, sub: *account.SubAccount, is_taker: bool) !void {
     const user_addr = if (is_taker) fill.taker else fill.maker;
+    if (!std.mem.eql(u8, &sub.address, &user_addr)) return;
+
+    const spec = switch (fill.instrument_kind) {
+        .perp => |perp| perp,
+        else => return error.InvalidInstrumentKind,
+    };
+    const requested_leverage = if (is_taker) fill.taker_leverage else fill.maker_leverage;
+    try validateRequestedLeverage(requested_leverage, spec.max_leverage);
+
     const gop = try sub.positions.getOrPut(fill.instrument_id);
     if (!gop.found_existing) {
         gop.value_ptr.* = .{
             .instrument_id = fill.instrument_id,
-            .kind = .{ .perp = .{
-                .tick_size = 1,
-                .lot_size = 1,
-                .max_leverage = 50,
-                .funding_interval_ms = 3_600_000,
-                .mark_method = .oracle,
-                .isolated_only = false,
-            } },
+            .kind = fill.instrument_kind,
             .user = user_addr,
             .size = fill.size,
             .side = if (fill.taker_is_buy == is_taker) .long else .short,
             .entry_price = fill.price,
             .realized_pnl = 0,
-            .leverage = 10,
+            .leverage = requested_leverage,
             .margin_mode = .cross,
             .isolated_margin = 0,
             .funding_index = 0,
@@ -84,10 +86,11 @@ fn applyPerpFill(fill: types.Fill, sub: *account.SubAccount, is_taker: bool) !vo
         const incoming_side: shared.types.Side = if (fill.taker_is_buy == is_taker) .long else .short;
         if (pos.side == incoming_side) {
             const total_size = pos.size + fill.size;
-            const old_notional = shared.fixed_point.mulPriceQty(pos.entry_price, pos.size);
-            const new_notional = shared.fixed_point.mulPriceQty(fill.price, fill.size);
-            pos.entry_price = @divTrunc(old_notional + new_notional, total_size);
+            const old_weighted_price = @as(u512, @intCast(pos.entry_price)) * @as(u512, @intCast(pos.size));
+            const new_weighted_price = @as(u512, @intCast(fill.price)) * @as(u512, @intCast(fill.size));
+            pos.entry_price = @intCast((old_weighted_price + new_weighted_price) / @as(u512, @intCast(total_size)));
             pos.size = total_size;
+            pos.leverage = requested_leverage;
         } else {
             if (fill.size < pos.size) {
                 const pnl = calcPnl(pos, fill.size, fill.price);
@@ -96,16 +99,22 @@ fn applyPerpFill(fill: types.Fill, sub: *account.SubAccount, is_taker: bool) !vo
             } else if (fill.size == pos.size) {
                 const pnl = calcPnl(pos, fill.size, fill.price);
                 pos.realized_pnl += pnl;
-                pos.size = 0;
+                _ = sub.positions.remove(fill.instrument_id);
+                return;
             } else {
                 const pnl = calcPnl(pos, pos.size, fill.price);
                 pos.realized_pnl += pnl;
                 pos.size = fill.size - pos.size;
                 pos.side = incoming_side;
                 pos.entry_price = fill.price;
+                pos.leverage = requested_leverage;
             }
         }
     }
+}
+
+fn validateRequestedLeverage(leverage: u8, max_leverage: u8) !void {
+    if (leverage == 0 or leverage > max_leverage) return error.InvalidLeverage;
 }
 
 fn calcPnl(pos: *const types.Position, close_size: shared.types.Quantity, close_price: shared.types.Price) shared.types.SignedAmount {
@@ -152,6 +161,7 @@ test "perp long - open, increase VWAP, partial close" {
         .maker_order_id = 2,
         .price = 100_000,
         .size = 1,
+        .taker_leverage = 15,
         .taker_is_buy = true,
         .timestamp = 0,
     };
@@ -173,6 +183,7 @@ test "perp long - open, increase VWAP, partial close" {
         .maker_order_id = 4,
         .price = 102_000,
         .size = 1,
+        .taker_leverage = 10,
         .taker_is_buy = true,
         .timestamp = 0,
     };
@@ -181,6 +192,7 @@ test "perp long - open, increase VWAP, partial close" {
     const pos = sub.positions.get(1).?;
     try std.testing.expectEqual(@as(shared.types.Quantity, 2), pos.size);
     try std.testing.expectEqual(@as(shared.types.Price, 101_000), pos.entry_price);
+    try std.testing.expectEqual(@as(u8, 10), pos.leverage);
 
     const fill3 = types.Fill{
         .instrument_id = 1,
@@ -205,4 +217,106 @@ test "perp long - open, increase VWAP, partial close" {
 
     const pos2 = sub.positions.get(1).?;
     try std.testing.expectEqual(@as(shared.types.Quantity, 1), pos2.size);
+}
+
+test "perp exact close removes position" {
+    const alloc = std.testing.allocator;
+    const master_addr = [_]u8{0xAA} ** 20;
+    var master = account.MasterAccount.init(alloc, master_addr, 0);
+    defer master.deinit();
+
+    const sub = try master.openSubAccount(0, null, 0);
+
+    const state = margin_mod.GlobalState{
+        .markPriceFn = struct {
+            fn mark(_: types.InstrumentId) ?shared.types.Price {
+                return 100_000;
+            }
+        }.mark,
+        .now_ms = 0,
+    };
+
+    var unit = PerpClearingUnit.init(alloc);
+    defer unit.deinit();
+
+    const open_fill = types.Fill{
+        .instrument_id = 1,
+        .instrument_kind = .{ .perp = .{
+            .tick_size = 1,
+            .lot_size = 1,
+            .max_leverage = 50,
+            .funding_interval_ms = 3_600_000,
+            .mark_method = .oracle,
+            .isolated_only = false,
+        } },
+        .taker = sub.address,
+        .maker = [_]u8{0xBB} ** 20,
+        .taker_order_id = 1,
+        .maker_order_id = 2,
+        .price = 100_000,
+        .size = 1,
+        .taker_leverage = 20,
+        .taker_is_buy = true,
+        .timestamp = 0,
+    };
+    _ = try unit.settle(open_fill, sub, sub, &state);
+
+    const close_fill = types.Fill{
+        .instrument_id = 1,
+        .instrument_kind = open_fill.instrument_kind,
+        .taker = sub.address,
+        .maker = [_]u8{0xBB} ** 20,
+        .taker_order_id = 3,
+        .maker_order_id = 4,
+        .price = 101_000,
+        .size = 1,
+        .taker_is_buy = false,
+        .timestamp = 0,
+    };
+    _ = try unit.settle(close_fill, sub, sub, &state);
+
+    try std.testing.expect(sub.positions.get(1) == null);
+    try std.testing.expect(!sub.hasOpenPositions());
+}
+
+test "perp open validates requested leverage against instrument max" {
+    const alloc = std.testing.allocator;
+    const master_addr = [_]u8{0xAA} ** 20;
+    var master = account.MasterAccount.init(alloc, master_addr, 0);
+    defer master.deinit();
+
+    const sub = try master.openSubAccount(0, null, 0);
+
+    const state = margin_mod.GlobalState{
+        .markPriceFn = struct {
+            fn mark(_: types.InstrumentId) ?shared.types.Price {
+                return 100_000;
+            }
+        }.mark,
+        .now_ms = 0,
+    };
+
+    var unit = PerpClearingUnit.init(alloc);
+    defer unit.deinit();
+
+    try std.testing.expectError(error.InvalidLeverage, unit.settle(.{
+        .instrument_id = 1,
+        .instrument_kind = .{ .perp = .{
+            .tick_size = 1,
+            .lot_size = 1,
+            .max_leverage = 25,
+            .funding_interval_ms = 3_600_000,
+            .mark_method = .oracle,
+            .isolated_only = false,
+        } },
+        .taker = sub.address,
+        .maker = [_]u8{0xBB} ** 20,
+        .taker_order_id = 1,
+        .maker_order_id = 2,
+        .price = 100_000,
+        .size = 1,
+        .taker_leverage = 26,
+        .taker_is_buy = true,
+        .timestamp = 0,
+    }, sub, sub, &state));
 }

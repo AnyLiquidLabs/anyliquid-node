@@ -8,19 +8,16 @@ const margin_mod = @import("margin.zig");
 pub const LiquidationEngine = struct {
     allocator: std.mem.Allocator,
     insurance_fund: shared.types.Quantity,
-    margin_engine: *margin_mod.MarginEngine,
     cfg: types.LiquidationConfig,
 
     pub fn init(
         alloc: std.mem.Allocator,
         insurance_fund: shared.types.Quantity,
-        margin_engine: *margin_mod.MarginEngine,
         cfg: types.LiquidationConfig,
     ) LiquidationEngine {
         return .{
             .allocator = alloc,
             .insurance_fund = insurance_fund,
-            .margin_engine = margin_engine,
             .cfg = cfg,
         };
     }
@@ -28,6 +25,7 @@ pub const LiquidationEngine = struct {
     /// Scan all sub-accounts and return liquidation candidates.
     pub fn scanCandidates(
         self: *LiquidationEngine,
+        margin_engine: *const margin_mod.MarginEngine,
         masters: *const std.AutoHashMap(shared.types.Address, account.MasterAccount),
         state: *const margin_mod.GlobalState,
     ) ![]types.LiquidationCandidate {
@@ -40,10 +38,14 @@ pub const LiquidationEngine = struct {
             var i: u8 = 0;
             while (i < types.MAX_SUB_ACCOUNTS) : (i += 1) {
                 if (master.sub_accounts[i]) |*sub| {
-                    const summary = self.margin_engine.compute(sub, state);
+                    const summary = margin_engine.compute(sub, state);
                     if (summary.health == .liquidatable) {
-                        const deficit = if (summary.maintenance_margin > @as(shared.types.Quantity, @intCast(summary.total_equity)))
-                            summary.maintenance_margin - @as(shared.types.Quantity, @intCast(summary.total_equity))
+                        const covered_equity: shared.types.Quantity = if (summary.total_equity > 0)
+                            @as(shared.types.Quantity, @intCast(summary.total_equity))
+                        else
+                            0;
+                        const deficit = if (summary.maintenance_margin > covered_equity)
+                            summary.maintenance_margin - covered_equity
                         else
                             0;
 
@@ -246,10 +248,10 @@ test "scan finds account below maintenance margin" {
         }.mark,
     };
 
-    var margin_engine = margin_mod.MarginEngine.init(.{});
-    var engine = LiquidationEngine.init(alloc, 0, &margin_engine, .{});
+    const margin_engine = margin_mod.MarginEngine.init(.{});
+    var engine = LiquidationEngine.init(alloc, 0, .{});
 
-    const candidates = try engine.scanCandidates(&masters, &state);
+    const candidates = try engine.scanCandidates(&margin_engine, &masters, &state);
     defer alloc.free(candidates);
 
     try std.testing.expect(candidates.len >= 1);
@@ -297,8 +299,8 @@ test "liquidation surplus - credited to insurance fund" {
         }.mark,
     };
 
-    var margin_engine = margin_mod.MarginEngine.init(.{});
-    var engine = LiquidationEngine.init(alloc, 0, &margin_engine, .{});
+    const margin_engine = margin_mod.MarginEngine.init(.{});
+    var engine = LiquidationEngine.init(alloc, 0, .{});
 
     const candidate = types.LiquidationCandidate{
         .user = sub.address,
@@ -310,6 +312,7 @@ test "liquidation surplus - credited to insurance fund" {
     const result = try engine.execute(candidate, sub, &state);
     try std.testing.expect(result.insurance_fund_delta > 0);
     try std.testing.expect(!result.adl_triggered);
+    _ = margin_engine;
 }
 
 test "ADL ranking - higher profit x leverage reduced first" {

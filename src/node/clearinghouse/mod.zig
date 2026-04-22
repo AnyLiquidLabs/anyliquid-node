@@ -19,14 +19,12 @@ pub const Clearinghouse = struct {
     mode_manager: account_mode_mod.AccountModeManager,
 
     pub fn init(cfg: types.ClearinghouseConfig, alloc: std.mem.Allocator) !Clearinghouse {
-        var margin_engine = margin_mod.MarginEngine.init(.{});
-
         return .{
             .allocator = alloc,
             .router = router_mod.InstrumentRouter.init(alloc, cfg.fee_config),
-            .margin_engine = margin_engine,
-            .liquidation_engine = liquidation_mod.LiquidationEngine.init(alloc, 0, &margin_engine, .{}),
-            .transfer_engine = transfer_mod.TransferEngine.init(alloc, &margin_engine),
+            .margin_engine = margin_mod.MarginEngine.init(.{}),
+            .liquidation_engine = liquidation_mod.LiquidationEngine.init(alloc, 0, .{}),
+            .transfer_engine = transfer_mod.TransferEngine.init(alloc),
             .mode_manager = account_mode_mod.AccountModeManager.init(alloc),
         };
     }
@@ -81,7 +79,7 @@ pub const Clearinghouse = struct {
         masters: *const std.AutoHashMap(shared.types.Address, account_mod.MasterAccount),
         state: *const margin_mod.GlobalState,
     ) ![]types.LiquidationCandidate {
-        return self.liquidation_engine.scanCandidates(masters, state);
+        return self.liquidation_engine.scanCandidates(&self.margin_engine, masters, state);
     }
 
     /// Execute liquidation for a candidate.
@@ -105,6 +103,7 @@ pub const Clearinghouse = struct {
         state: *const margin_mod.GlobalState,
     ) !types.TransferEvent {
         return self.transfer_engine.executeIntraMaster(
+            &self.margin_engine,
             from_index,
             to_index,
             asset_id,
@@ -143,6 +142,7 @@ pub const Clearinghouse = struct {
         state: *const margin_mod.GlobalState,
     ) !types.TransferEvent {
         return self.transfer_engine.executeWithdrawal(
+            &self.margin_engine,
             from_index,
             asset_id,
             amount,

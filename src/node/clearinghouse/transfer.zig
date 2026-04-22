@@ -7,18 +7,17 @@ const margin_mod = @import("margin.zig");
 /// TransferEngine handles all collateral movements: intra-master transfers, deposits, withdrawals.
 pub const TransferEngine = struct {
     allocator: std.mem.Allocator,
-    margin_engine: *margin_mod.MarginEngine,
 
-    pub fn init(alloc: std.mem.Allocator, margin_engine: *margin_mod.MarginEngine) TransferEngine {
+    pub fn init(alloc: std.mem.Allocator) TransferEngine {
         return .{
             .allocator = alloc,
-            .margin_engine = margin_engine,
         };
     }
 
     /// Execute intra-master transfer between sub-accounts.
     pub fn executeIntraMaster(
         self: *TransferEngine,
+        margin_engine: *const margin_mod.MarginEngine,
         from_index: u8,
         to_index: u8,
         asset_id: types.AssetId,
@@ -30,14 +29,15 @@ pub const TransferEngine = struct {
         if (from_index >= types.MAX_SUB_ACCOUNTS) return error.InvalidSubAccountIndex;
         if (to_index >= types.MAX_SUB_ACCOUNTS) return error.InvalidSubAccountIndex;
 
-        var from_sub = master.sub_accounts[from_index] orelse return error.SubAccountNotFound;
-        var to_sub = master.sub_accounts[to_index] orelse return error.SubAccountNotFound;
+        _ = self;
+        const from_sub = master.subAccountByIndex(from_index) orelse return error.SubAccountNotFound;
+        const to_sub = master.subAccountByIndex(to_index) orelse return error.SubAccountNotFound;
 
         // Check source has sufficient balance
         if (from_sub.collateral.rawBalance(asset_id) < amount) return error.InsufficientBalance;
 
         // Check transfer would not breach maintenance margin
-        try self.margin_engine.checkTransferMargin(&from_sub, amount, state);
+        try margin_engine.checkTransferMargin(from_sub, asset_id, amount, state);
 
         // Execute transfer atomically
         try from_sub.collateral.withdraw(asset_id, amount);
@@ -64,7 +64,7 @@ pub const TransferEngine = struct {
         _ = self;
         if (to_index >= types.MAX_SUB_ACCOUNTS) return error.InvalidSubAccountIndex;
 
-        var to_sub = master.sub_accounts[to_index] orelse return error.SubAccountNotFound;
+        const to_sub = master.subAccountByIndex(to_index) orelse return error.SubAccountNotFound;
 
         // Credit the deposit
         to_sub.collateral.credit(asset_id, amount);
@@ -81,6 +81,7 @@ pub const TransferEngine = struct {
     /// Execute withdrawal from a sub-account.
     pub fn executeWithdrawal(
         self: *TransferEngine,
+        margin_engine: *const margin_mod.MarginEngine,
         from_index: u8,
         asset_id: types.AssetId,
         amount: shared.types.Quantity,
@@ -90,13 +91,14 @@ pub const TransferEngine = struct {
     ) !types.TransferEvent {
         if (from_index >= types.MAX_SUB_ACCOUNTS) return error.InvalidSubAccountIndex;
 
-        var from_sub = master.sub_accounts[from_index] orelse return error.SubAccountNotFound;
+        _ = self;
+        const from_sub = master.subAccountByIndex(from_index) orelse return error.SubAccountNotFound;
 
         // Check source has sufficient balance
         if (from_sub.collateral.rawBalance(asset_id) < amount) return error.InsufficientBalance;
 
         // Check withdrawal would not breach transfer margin floor
-        try self.margin_engine.checkTransferMargin(&from_sub, amount, state);
+        try margin_engine.checkTransferMargin(from_sub, asset_id, amount, state);
 
         // Execute withdrawal
         try from_sub.collateral.withdraw(asset_id, amount);
@@ -114,6 +116,12 @@ pub const TransferEngine = struct {
 pub const GlobalState = struct {
     now_ms: i64,
 };
+
+const test_btc_mark = shared.fixed_point.priceFromWhole(100_000 * types.USDC);
+
+fn testBtcMark(_: types.InstrumentId) ?shared.types.Price {
+    return test_btc_mark;
+}
 
 test "intra-master transfer - moves asset between sub-accounts" {
     const alloc = std.testing.allocator;
@@ -138,10 +146,10 @@ test "intra-master transfer - moves asset between sub-accounts" {
         .now_ms = 0,
     };
 
-    var margin_engine = margin_mod.MarginEngine.init(.{});
-    var engine = TransferEngine.init(alloc, &margin_engine);
+    const margin_engine = margin_mod.MarginEngine.init(.{});
+    var engine = TransferEngine.init(alloc);
 
-    const event = try engine.executeIntraMaster(0, 1, types.USDC_ID, 3_000 * types.USDC, &master, &state);
+    const event = try engine.executeIntraMaster(&margin_engine, 0, 1, types.USDC_ID, 3_000 * types.USDC, &master, &state);
 
     try std.testing.expect(std.mem.eql(u8, &event.from_addr, &sub0.address));
     try std.testing.expect(std.mem.eql(u8, &event.to_addr, &sub1.address));
@@ -164,7 +172,7 @@ test "intra-master transfer - rejected if would breach maintenance margin" {
     try sub0.collateral.deposit(types.USDC_ID, 3_000 * types.USDC, &types.defaultCollateralRegistry);
 
     // Create a position that requires margin
-    sub0.positions.put(1, .{
+    try sub0.positions.put(1, .{
         .instrument_id = 1,
         .kind = .{ .perp = .{
             .tick_size = 1,
@@ -177,7 +185,7 @@ test "intra-master transfer - rejected if would breach maintenance margin" {
         .user = sub0.address,
         .size = 1,
         .side = .long,
-        .entry_price = 100_000,
+        .entry_price = test_btc_mark,
         .realized_pnl = 0,
         .leverage = 10,
         .margin_mode = .cross,
@@ -187,23 +195,19 @@ test "intra-master transfer - rejected if would breach maintenance margin" {
         .gamma = 0,
         .vega = 0,
         .theta = 0,
-    }) catch {};
+    });
 
     const state = margin_mod.GlobalState{
-        .markPriceFn = struct {
-            fn mark(_: types.InstrumentId) ?shared.types.Price {
-                return 100_000;
-            }
-        }.mark,
+        .markPriceFn = testBtcMark,
         .now_ms = 0,
     };
 
-    var margin_engine = margin_mod.MarginEngine.init(.{});
-    var engine = TransferEngine.init(alloc, &margin_engine);
+    const margin_engine = margin_mod.MarginEngine.init(.{});
+    var engine = TransferEngine.init(alloc);
 
     try std.testing.expectError(
         error.TransferWouldBreachMarginFloor,
-        engine.executeIntraMaster(0, 1, types.USDC_ID, 200 * types.USDC, &master, &state),
+        engine.executeIntraMaster(&margin_engine, 0, 1, types.USDC_ID, 200 * types.USDC, &master, &state),
     );
 
     // Atomic rollback: source balance unchanged
@@ -222,7 +226,7 @@ test "withdrawal - rejected if would breach transfer margin floor" {
     try sub0.collateral.deposit(types.USDC_ID, 3_000 * types.USDC, &types.defaultCollateralRegistry);
 
     // Create a position
-    sub0.positions.put(1, .{
+    try sub0.positions.put(1, .{
         .instrument_id = 1,
         .kind = .{ .perp = .{
             .tick_size = 1,
@@ -235,7 +239,7 @@ test "withdrawal - rejected if would breach transfer margin floor" {
         .user = sub0.address,
         .size = 1,
         .side = .long,
-        .entry_price = 100_000,
+        .entry_price = test_btc_mark,
         .realized_pnl = 0,
         .leverage = 10,
         .margin_mode = .cross,
@@ -245,23 +249,19 @@ test "withdrawal - rejected if would breach transfer margin floor" {
         .gamma = 0,
         .vega = 0,
         .theta = 0,
-    }) catch {};
+    });
 
     const state = margin_mod.GlobalState{
-        .markPriceFn = struct {
-            fn mark(_: types.InstrumentId) ?shared.types.Price {
-                return 100_000;
-            }
-        }.mark,
+        .markPriceFn = testBtcMark,
         .now_ms = 0,
     };
 
-    var margin_engine = margin_mod.MarginEngine.init(.{});
-    var engine = TransferEngine.init(alloc, &margin_engine);
+    const margin_engine = margin_mod.MarginEngine.init(.{});
+    var engine = TransferEngine.init(alloc);
 
     try std.testing.expectError(
         error.TransferWouldBreachMarginFloor,
-        engine.executeWithdrawal(0, types.USDC_ID, 200 * types.USDC, [_]u8{0xBB} ** 20, &master, &state),
+        engine.executeWithdrawal(&margin_engine, 0, types.USDC_ID, 200 * types.USDC, [_]u8{0xBB} ** 20, &master, &state),
     );
 }
 
@@ -283,12 +283,13 @@ test "deposit - credits sub-account balance" {
         .now_ms = 0,
     };
 
-    var margin_engine = margin_mod.MarginEngine.init(.{});
-    var engine = TransferEngine.init(alloc, &margin_engine);
+    const margin_engine = margin_mod.MarginEngine.init(.{});
+    var engine = TransferEngine.init(alloc);
 
     const event = try engine.executeDeposit(0, types.USDC_ID, 5_000 * types.USDC, &master, &state);
 
     try std.testing.expect(std.mem.eql(u8, &event.to_addr, &sub0.address));
     try std.testing.expect(event.amount == 5_000 * types.USDC);
     try std.testing.expectEqual(5_000 * types.USDC, sub0.collateral.rawBalance(types.USDC_ID));
+    _ = margin_engine;
 }

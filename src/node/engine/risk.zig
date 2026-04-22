@@ -5,6 +5,7 @@ const state_mod = @import("../state.zig");
 
 pub const RiskError = error{
     InsufficientMargin,
+    InvalidLeverage,
     PositionNotFound,
 };
 
@@ -63,10 +64,10 @@ pub const RiskEngine = struct {
         state: *state_mod.GlobalState,
     ) !void {
         _ = state;
-        try self.checkMarginBeforeTrade(taker.user, taker.asset_id, taker.is_buy, fill_size, fill_px);
-        try self.checkMarginBeforeTrade(maker.user, maker.asset_id, maker.is_buy, fill_size, fill_px);
-        try self.applyTrade(taker.user, taker.asset_id, taker.is_buy, fill_size, fill_px);
-        try self.applyTrade(maker.user, maker.asset_id, maker.is_buy, fill_size, fill_px);
+        try self.checkMarginBeforeTrade(taker.user, taker.asset_id, taker.is_buy, taker.leverage, fill_size, fill_px);
+        try self.checkMarginBeforeTrade(maker.user, maker.asset_id, maker.is_buy, maker.leverage, fill_size, fill_px);
+        try self.applyTrade(taker.user, taker.asset_id, taker.is_buy, taker.leverage, fill_size, fill_px);
+        try self.applyTrade(maker.user, maker.asset_id, maker.is_buy, maker.leverage, fill_size, fill_px);
         try self.refreshExposure(taker.asset_id);
     }
 
@@ -225,6 +226,7 @@ pub const RiskEngine = struct {
         addr: shared.types.Address,
         asset_id: shared.types.AssetId,
         is_buy: bool,
+        leverage: u8,
         fill_size: shared.types.Quantity,
         fill_px: shared.types.Price,
     ) !void {
@@ -237,7 +239,8 @@ pub const RiskEngine = struct {
             }
         }
 
-        const im_req = initialMarginRequired(fill_size, fill_px);
+        if (leverage == 0) return RiskError.InvalidLeverage;
+        const im_req = initialMarginRequired(fill_size, fill_px, leverage);
         const equity: shared.types.SignedAmount = @intCast(account.balance);
         if (equity < im_req) {
             return RiskError.InsufficientMargin;
@@ -249,6 +252,7 @@ pub const RiskEngine = struct {
         addr: shared.types.Address,
         asset_id: shared.types.AssetId,
         is_buy: bool,
+        leverage: u8,
         fill_size: shared.types.Quantity,
         fill_px: shared.types.Price,
     ) !void {
@@ -262,7 +266,7 @@ pub const RiskEngine = struct {
                 .size = fill_size,
                 .entry_price = fill_px,
                 .isolated_margin = 0,
-                .leverage = 1,
+                .leverage = leverage,
             };
             return;
         }
@@ -274,6 +278,7 @@ pub const RiskEngine = struct {
                 (@as(u512, fill_px) * @as(u512, fill_size));
             pos.entry_price = @intCast(weighted / @as(u512, total_size));
             pos.size = total_size;
+            pos.leverage = leverage;
             return;
         }
 
@@ -292,6 +297,7 @@ pub const RiskEngine = struct {
         pos.size = fill_size - pos.size;
         pos.entry_price = fill_px;
         pos.unrealized_pnl = 0;
+        pos.leverage = leverage;
     }
 
     fn refreshExposure(self: *RiskEngine, asset_id: shared.types.AssetId) !void {
@@ -340,10 +346,9 @@ fn maintenanceMarginRequired(size: shared.types.Quantity, price: shared.types.Pr
     return @intCast(@divTrunc((@as(i512, @intCast(notional)) * MAINTENANCE_BPS), BPS_SCALE));
 }
 
-fn initialMarginRequired(size: shared.types.Quantity, price: shared.types.Price) shared.types.SignedAmount {
+fn initialMarginRequired(size: shared.types.Quantity, price: shared.types.Price, leverage: u8) shared.types.SignedAmount {
     const notional = positionNotional(size, price);
-    const im_bps: i256 = 1000;
-    return @intCast(@divTrunc((@as(i512, @intCast(notional)) * im_bps), BPS_SCALE));
+    return @intCast(@divTrunc(@as(i512, @intCast(notional)), @as(i512, @intCast(leverage))));
 }
 
 pub fn adlRank(pos: *const shared.types.Position, mark_px: shared.types.Price) f64 {

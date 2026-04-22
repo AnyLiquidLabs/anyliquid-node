@@ -82,7 +82,7 @@ pub const PortfolioMargin = struct {
             const pos = entry.value_ptr;
             if (pos.margin_mode == .cross) {
                 if (state.markPrice(pos.instrument_id)) |mark_px| {
-                    const mm_rate = types.maintenanceMarginRate(50); // max leverage
+                    const mm_rate = types.maintenanceMarginRate(types.instrumentMaxLeverage(pos.kind, 50));
                     const notional = shared.fixed_point.mulPriceQty(mark_px, pos.size);
                     cross_mm += @intFromFloat(@as(f64, @floatFromInt(notional)) * mm_rate);
                 }

@@ -11,7 +11,7 @@ pub const MarginEngine = struct {
         return .{ .cfg = cfg };
     }
 
-    pub fn compute(self: *MarginEngine, sub: *const account.SubAccount, state: *const GlobalState) types.MarginSummary {
+    pub fn compute(self: *const MarginEngine, sub: *const account.SubAccount, state: *const GlobalState) types.MarginSummary {
         return switch (sub.master_mode) {
             .standard => self.computeStandard(sub, state),
             .unified => self.computeUnified(sub, state),
@@ -20,7 +20,7 @@ pub const MarginEngine = struct {
         };
     }
 
-    pub fn computeStandard(self: *MarginEngine, sub: *const account.SubAccount, state: *const GlobalState) types.MarginSummary {
+    pub fn computeStandard(self: *const MarginEngine, sub: *const account.SubAccount, state: *const GlobalState) types.MarginSummary {
         var total_im: shared.types.Quantity = 0;
         var total_mm: shared.types.Quantity = 0;
         var total_notional: shared.types.Quantity = 0;
@@ -32,8 +32,7 @@ pub const MarginEngine = struct {
                 const notional = pos.notional(mark_px);
                 total_notional += notional;
                 total_im += types.initialMargin(pos.size, mark_px, pos.leverage);
-                const mm_rate = types.maintenanceMarginRate(self.cfg.default_max_leverage);
-                total_mm += @intFromFloat(@as(f64, @floatFromInt(notional)) * mm_rate);
+                total_mm += maintenanceMarginForPosition(pos, mark_px, self.cfg.default_max_leverage);
             }
         }
 
@@ -57,7 +56,7 @@ pub const MarginEngine = struct {
         };
     }
 
-    pub fn computeUnified(self: *MarginEngine, sub: *const account.SubAccount, state: *const GlobalState) types.MarginSummary {
+    pub fn computeUnified(self: *const MarginEngine, sub: *const account.SubAccount, state: *const GlobalState) types.MarginSummary {
         var total_im: shared.types.Quantity = 0;
         var total_mm: shared.types.Quantity = 0;
         var total_upnl: shared.types.SignedAmount = 0;
@@ -70,8 +69,7 @@ pub const MarginEngine = struct {
                 const notional = pos.notional(mark_px);
                 total_notional += notional;
                 total_im += types.initialMargin(pos.size, mark_px, pos.leverage);
-                const mm_rate = types.maintenanceMarginRate(self.cfg.default_max_leverage);
-                total_mm += @intFromFloat(@as(f64, @floatFromInt(notional)) * mm_rate);
+                total_mm += maintenanceMarginForPosition(pos, mark_px, self.cfg.default_max_leverage);
                 total_upnl += pos.unrealizedPnl(mark_px);
             }
         }
@@ -97,7 +95,7 @@ pub const MarginEngine = struct {
         };
     }
 
-    pub fn computePortfolio(self: *MarginEngine, sub: *const account.SubAccount, state: *const GlobalState) types.MarginSummary {
+    pub fn computePortfolio(self: *const MarginEngine, sub: *const account.SubAccount, state: *const GlobalState) types.MarginSummary {
         // Fall back to unified if caps exceeded
         if (!portfolio_mod.PortfolioMargin.portfolioCapsAvailable(sub, 500_000_000 * types.USDC, 100_000_000 * types.USDC)) {
             return self.computeUnified(sub, state);
@@ -124,8 +122,7 @@ pub const MarginEngine = struct {
                 const notional = pos.notional(mark_px);
                 total_notional += notional;
                 total_im += types.initialMargin(pos.size, mark_px, pos.leverage);
-                const mm_rate = types.maintenanceMarginRate(self.cfg.default_max_leverage);
-                total_mm += @intFromFloat(@as(f64, @floatFromInt(notional)) * mm_rate);
+                total_mm += maintenanceMarginForPosition(pos, mark_px, self.cfg.default_max_leverage);
                 total_upnl += pos.unrealizedPnl(mark_px);
             }
         }
@@ -151,31 +148,65 @@ pub const MarginEngine = struct {
         };
     }
 
-    pub fn checkInitialMargin(self: *MarginEngine, sub: *const account.SubAccount, order: shared.types.Order, state: *const GlobalState) !void {
-        _ = order;
+    pub fn checkInitialMargin(self: *const MarginEngine, sub: *const account.SubAccount, order: shared.types.Order, state: *const GlobalState) !void {
         const summary = self.compute(sub, state);
-        if (summary.available_balance == 0 and summary.initial_margin_used > 0) {
+        const instrument_id = try orderInstrumentId(order);
+        const max_leverage = state.instrumentMaxLeverage(instrument_id, self.cfg.default_max_leverage);
+        try validateRequestedLeverage(order.leverage, max_leverage);
+
+        const mark_px = state.markPrice(instrument_id) orelse if (order.price > 0)
+            order.price
+        else
+            return error.MarkPriceUnavailable;
+
+        const current_pos = sub.positions.get(instrument_id);
+        const current_im = if (current_pos) |pos|
+            types.initialMargin(pos.size, mark_px, pos.leverage)
+        else
+            0;
+        const projected_im = projectedInitialMargin(order, current_pos, mark_px);
+
+        if (projected_im <= current_im) return;
+        if (summary.available_balance < (projected_im - current_im)) {
             return error.InsufficientMargin;
         }
     }
 
-    pub fn checkTransferMargin(self: *MarginEngine, sub: *const account.SubAccount, amount: shared.types.Quantity, state: *const GlobalState) !void {
+    pub fn checkTransferMargin(
+        self: *const MarginEngine,
+        sub: *const account.SubAccount,
+        asset_id: types.AssetId,
+        amount: shared.types.Quantity,
+        state: *const GlobalState,
+    ) !void {
         _ = self;
-        _ = state;
-        _ = sub;
-        _ = amount;
-        // TODO: Implement proper transfer margin check
-        // This requires access to collateral registry for effective total calculation
-        return;
+        if (amount == 0) return;
+
+        const collateral_registry = types.defaultCollateralRegistry;
+        const current_effective = sub.collateral.effectiveTotal(&collateral_registry);
+        const remaining_effective = current_effective - @min(current_effective, effectiveCollateralValue(asset_id, amount, &collateral_registry));
+        const required = transferMarginRequired(sub, state);
+
+        if (remaining_effective < required) {
+            return error.TransferWouldBreachMarginFloor;
+        }
     }
 };
 
 pub const GlobalState = struct {
     markPriceFn: *const fn (types.InstrumentId) ?shared.types.Price,
+    instrumentMaxLeverageFn: ?*const fn (types.InstrumentId) ?u8 = null,
     now_ms: i64 = 0,
 
     pub fn markPrice(self: *const GlobalState, instrument_id: types.InstrumentId) ?shared.types.Price {
         return self.markPriceFn(instrument_id);
+    }
+
+    pub fn instrumentMaxLeverage(self: *const GlobalState, instrument_id: types.InstrumentId, fallback: u8) u8 {
+        if (self.instrumentMaxLeverageFn) |resolver| {
+            if (resolver(instrument_id)) |max_leverage| return max_leverage;
+        }
+        return fallback;
     }
 };
 
@@ -196,14 +227,62 @@ fn transferMarginRequired(sub: *const account.SubAccount, state: *const GlobalSt
     return @max(total_im, total_notional / 10);
 }
 
+fn effectiveCollateralValue(asset_id: types.AssetId, amount: shared.types.Quantity, registry: types.CollateralRegistry) shared.types.Quantity {
+    for (registry) |entry| {
+        if (entry.asset_id == asset_id) {
+            return @intFromFloat(@as(f64, @floatFromInt(amount)) * (1.0 - entry.haircut_pct));
+        }
+    }
+    return 0;
+}
+
+fn orderInstrumentId(order: shared.types.Order) !types.InstrumentId {
+    return std.math.cast(types.InstrumentId, order.asset_id) orelse error.InvalidInstrumentId;
+}
+
+fn validateRequestedLeverage(leverage: u8, max_leverage: u8) !void {
+    if (leverage == 0 or leverage > max_leverage) return error.InvalidLeverage;
+}
+
+fn maintenanceMarginForPosition(pos: *const types.Position, mark_px: shared.types.Price, fallback_max_leverage: u8) shared.types.Quantity {
+    const notional = pos.notional(mark_px);
+    const mm_rate = types.maintenanceMarginRate(types.instrumentMaxLeverage(pos.kind, fallback_max_leverage));
+    return @intFromFloat(@as(f64, @floatFromInt(notional)) * mm_rate);
+}
+
+fn projectedInitialMargin(order: shared.types.Order, current_pos: ?types.Position, mark_px: shared.types.Price) shared.types.Quantity {
+    const order_side: shared.types.Side = if (order.is_buy) .long else .short;
+
+    if (current_pos) |pos| {
+        if (pos.side == order_side) {
+            return types.initialMargin(pos.size + order.size, mark_px, order.leverage);
+        }
+        if (order.size < pos.size) {
+            return types.initialMargin(pos.size - order.size, mark_px, pos.leverage);
+        }
+        if (order.size == pos.size) {
+            return 0;
+        }
+        return types.initialMargin(order.size - pos.size, mark_px, order.leverage);
+    }
+
+    return types.initialMargin(order.size, mark_px, order.leverage);
+}
+
 fn classifyHealth(equity: shared.types.SignedAmount, im: shared.types.Quantity, mm: shared.types.Quantity) types.AccountHealth {
     if (equity < @as(shared.types.SignedAmount, @intCast(mm))) return .liquidatable;
     if (equity < @as(shared.types.SignedAmount, @intCast(im))) return .warning;
     return .healthy;
 }
 
+const test_btc_mark = shared.fixed_point.priceFromWhole(100_000 * types.USDC);
+
+fn testBtcMark(_: types.InstrumentId) ?shared.types.Price {
+    return test_btc_mark;
+}
+
 test "initial margin formula - notional / leverage" {
-    try std.testing.expectEqual(@as(shared.types.Quantity, 10_000), types.initialMargin(1, 100_000, 10));
+    try std.testing.expectEqual(10_000 * types.USDC, types.initialMargin(1, test_btc_mark, 10));
 }
 
 test "maintenance margin rate - half of im rate at max leverage" {
@@ -222,7 +301,7 @@ test "cross - unrealized pnl immediately usable for new positions" {
     const state = GlobalState{
         .markPriceFn = struct {
             fn mark(_: types.InstrumentId) ?shared.types.Price {
-                return 100_000;
+                return test_btc_mark;
             }
         }.mark,
     };
@@ -242,18 +321,155 @@ test "transfer margin req - max(im, 10% notional)" {
     const sub = try master.openSubAccount(0, null, 0);
     try sub.collateral.deposit(types.USDC_ID, 25_000 * types.USDC, &types.defaultCollateralRegistry);
 
+    try sub.positions.put(1, .{
+        .instrument_id = 1,
+        .kind = .{ .perp = .{
+            .tick_size = 1,
+            .lot_size = 1,
+            .max_leverage = 50,
+            .funding_interval_ms = 3_600_000,
+            .mark_method = .oracle,
+            .isolated_only = false,
+        } },
+        .user = sub.address,
+        .size = 1,
+        .side = .long,
+        .entry_price = test_btc_mark,
+        .realized_pnl = 0,
+        .leverage = 5,
+        .margin_mode = .cross,
+        .isolated_margin = 0,
+        .funding_index = 0,
+        .delta = 0,
+        .gamma = 0,
+        .vega = 0,
+        .theta = 0,
+    });
+
     const state = GlobalState{
-        .markPriceFn = struct {
-            fn mark(_: types.InstrumentId) ?shared.types.Price {
-                return 100_000;
-            }
-        }.mark,
+        .markPriceFn = testBtcMark,
     };
 
     const engine = MarginEngine.init(.{});
     const req = transferMarginRequired(sub, &state);
     _ = engine;
-    _ = req;
+    try std.testing.expectEqual(20_000 * types.USDC, req);
+}
+
+test "check initial margin uses requested leverage" {
+    const alloc = std.testing.allocator;
+    const master_addr = [_]u8{0xAA} ** 20;
+    var master = account.MasterAccount.init(alloc, master_addr, 0);
+    defer master.deinit();
+
+    const sub = try master.openSubAccount(0, null, 0);
+    try sub.collateral.deposit(types.USDC_ID, 6_000 * types.USDC, &types.defaultCollateralRegistry);
+
+    const state = GlobalState{
+        .markPriceFn = testBtcMark,
+    };
+
+    const engine = MarginEngine.init(.{});
+    try engine.checkInitialMargin(sub, .{
+        .id = 1,
+        .user = sub.address,
+        .asset_id = 1,
+        .is_buy = true,
+        .price = test_btc_mark,
+        .size = 1,
+        .leverage = 20,
+        .order_type = .{ .limit = .gtc },
+        .cloid = null,
+        .nonce = 1,
+    }, &state);
+
+    try std.testing.expectError(error.InsufficientMargin, engine.checkInitialMargin(sub, .{
+        .id = 2,
+        .user = sub.address,
+        .asset_id = 1,
+        .is_buy = true,
+        .price = test_btc_mark,
+        .size = 1,
+        .leverage = 5,
+        .order_type = .{ .limit = .gtc },
+        .cloid = null,
+        .nonce = 2,
+    }, &state));
+}
+
+test "check initial margin rejects leverage above instrument max" {
+    const alloc = std.testing.allocator;
+    const master_addr = [_]u8{0xAA} ** 20;
+    var master = account.MasterAccount.init(alloc, master_addr, 0);
+    defer master.deinit();
+
+    const sub = try master.openSubAccount(0, null, 0);
+    try sub.collateral.deposit(types.USDC_ID, 100_000 * types.USDC, &types.defaultCollateralRegistry);
+
+    const state = GlobalState{
+        .markPriceFn = testBtcMark,
+        .instrumentMaxLeverageFn = struct {
+            fn maxLeverage(_: types.InstrumentId) ?u8 {
+                return 25;
+            }
+        }.maxLeverage,
+    };
+
+    const engine = MarginEngine.init(.{});
+    try std.testing.expectError(error.InvalidLeverage, engine.checkInitialMargin(sub, .{
+        .id = 1,
+        .user = sub.address,
+        .asset_id = 1,
+        .is_buy = true,
+        .price = test_btc_mark,
+        .size = 1,
+        .leverage = 26,
+        .order_type = .{ .limit = .gtc },
+        .cloid = null,
+        .nonce = 1,
+    }, &state));
+}
+
+test "maintenance margin uses instrument max leverage" {
+    const alloc = std.testing.allocator;
+    const master_addr = [_]u8{0xAA} ** 20;
+    var master = account.MasterAccount.init(alloc, master_addr, 0);
+    defer master.deinit();
+
+    const sub = try master.openSubAccount(0, null, 0);
+    try sub.collateral.deposit(types.USDC_ID, 20_000 * types.USDC, &types.defaultCollateralRegistry);
+    try sub.positions.put(1, .{
+        .instrument_id = 1,
+        .kind = .{ .perp = .{
+            .tick_size = 1,
+            .lot_size = 1,
+            .max_leverage = 10,
+            .funding_interval_ms = 3_600_000,
+            .mark_method = .oracle,
+            .isolated_only = false,
+        } },
+        .user = sub.address,
+        .size = 1,
+        .side = .long,
+        .entry_price = test_btc_mark,
+        .realized_pnl = 0,
+        .leverage = 10,
+        .margin_mode = .cross,
+        .isolated_margin = 0,
+        .funding_index = 0,
+        .delta = 0,
+        .gamma = 0,
+        .vega = 0,
+        .theta = 0,
+    });
+
+    const state = GlobalState{
+        .markPriceFn = testBtcMark,
+    };
+
+    const engine = MarginEngine.init(.{});
+    const summary = engine.computeUnified(sub, &state);
+    try std.testing.expectEqual(5_000 * types.USDC, summary.maintenance_margin);
 }
 
 test "transfer exceeds floor - rejected" {
@@ -265,15 +481,38 @@ test "transfer exceeds floor - rejected" {
     const sub = try master.openSubAccount(0, null, 0);
     try sub.collateral.deposit(types.USDC_ID, 25_000 * types.USDC, &types.defaultCollateralRegistry);
 
+    try sub.positions.put(1, .{
+        .instrument_id = 1,
+        .kind = .{ .perp = .{
+            .tick_size = 1,
+            .lot_size = 1,
+            .max_leverage = 50,
+            .funding_interval_ms = 3_600_000,
+            .mark_method = .oracle,
+            .isolated_only = false,
+        } },
+        .user = sub.address,
+        .size = 1,
+        .side = .long,
+        .entry_price = test_btc_mark,
+        .realized_pnl = 0,
+        .leverage = 5,
+        .margin_mode = .cross,
+        .isolated_margin = 0,
+        .funding_index = 0,
+        .delta = 0,
+        .gamma = 0,
+        .vega = 0,
+        .theta = 0,
+    });
+
     const state = GlobalState{
-        .markPriceFn = struct {
-            fn mark(_: types.InstrumentId) ?shared.types.Price {
-                return 100_000;
-            }
-        }.mark,
+        .markPriceFn = testBtcMark,
     };
 
     var engine = MarginEngine.init(.{});
-    // Currently a no-op implementation
-    try engine.checkTransferMargin(sub, 10_000 * types.USDC, &state);
+    try std.testing.expectError(
+        error.TransferWouldBreachMarginFloor,
+        engine.checkTransferMargin(sub, types.USDC_ID, 10_000 * types.USDC, &state),
+    );
 }

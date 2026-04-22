@@ -73,6 +73,7 @@ pub const OrderWire = struct {
     b: bool,
     p: []const u8,
     s: []const u8,
+    leverage: u8,   // requested leverage for the resulting position
     r: bool,
     t: OrderType,
     c: ?[]const u8,

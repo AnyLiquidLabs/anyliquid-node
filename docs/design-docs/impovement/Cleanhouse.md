@@ -640,9 +640,11 @@ pub const PositionMarginMode = enum {
 initial_margin = position_size × mark_price / leverage
 ```
 
-`leverage` is an integer in `[1, max_leverage]`. Leverage can be **increased**
-on an existing position without closing it. It is only checked at open time;
-the user is responsible for monitoring after that.
+`leverage` is carried on the open/increase order request and must be an integer
+in `[1, max_leverage]`. The requested value is persisted onto the resulting
+position on open / increase / flip. Leverage can be **increased** on an
+existing position without closing it. It is only checked at open time; the
+user is responsible for monitoring after that.
 
 For **cross** positions, initial margin is locked from the collateral pool and
 cannot be withdrawn while the position is open. Unrealized PnL from any cross
@@ -664,6 +666,8 @@ maintenance_margin_rate = 1 / (max_leverage × 2)
 ```
 
 Example: asset with `max_leverage = 50` → MM rate = 1% of notional.
+Maintenance margin is derived from each position's instrument spec, not from a
+single global leverage constant.
 
 **Cross liquidation trigger:**
 ```

@@ -48,7 +48,11 @@ pub const SubAccount = struct {
     }
 
     pub fn hasOpenPositions(self: *const SubAccount) bool {
-        return self.positions.count() > 0;
+        var it = self.positions.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.size > 0) return true;
+        }
+        return false;
     }
 
     pub fn hasCollateral(self: *const SubAccount) bool {

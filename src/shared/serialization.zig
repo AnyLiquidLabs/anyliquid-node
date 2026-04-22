@@ -147,6 +147,7 @@ fn writeOrderWire(list: *std.ArrayList(u8), allocator: std.mem.Allocator, order:
     try writeBool(list, allocator, order.b);
     try writeBytes(list, allocator, order.p);
     try writeBytes(list, allocator, order.s);
+    try list.append(allocator, order.leverage);
     try writeBool(list, allocator, order.r);
     try writeOrderType(list, allocator, order.t);
     try writeOptionalBytes(list, allocator, order.c);
@@ -158,6 +159,7 @@ fn decodeOrderWireInto(reader: *Reader, allocator: std.mem.Allocator, out: *type
         .b = try reader.readBool(),
         .p = try reader.readOwnedSlice(allocator),
         .s = undefined,
+        .leverage = 1,
         .r = false,
         .t = undefined,
         .c = null,
@@ -167,6 +169,7 @@ fn decodeOrderWireInto(reader: *Reader, allocator: std.mem.Allocator, out: *type
     out.s = try reader.readOwnedSlice(allocator);
     errdefer allocator.free(out.s);
 
+    out.leverage = try reader.readByte();
     out.r = try reader.readBool();
     out.t = try readOrderType(reader);
     out.c = try reader.readOptionalOwnedSlice(allocator);
@@ -513,6 +516,7 @@ pub fn cloneOrderWire(allocator: std.mem.Allocator, order: types.OrderWire) std.
         .b = order.b,
         .p = try allocator.dupe(u8, order.p),
         .s = try allocator.dupe(u8, order.s),
+        .leverage = order.leverage,
         .r = order.r,
         .t = order.t,
         .c = if (order.c) |cloid| try allocator.dupe(u8, cloid) else null,
@@ -1010,6 +1014,7 @@ test "action request round-trips through shared serialization" {
                 .b = true,
                 .p = "100.25",
                 .s = "0.5",
+                .leverage = 20,
                 .r = false,
                 .t = .{ .limit = .gtc },
                 .c = "cloid-1",
@@ -1035,6 +1040,7 @@ test "action request round-trips through shared serialization" {
     try std.testing.expectEqual(req.user, decoded.user);
     try std.testing.expectEqualStrings("order", decoded.action.order.type);
     try std.testing.expectEqualStrings("100.25", decoded.action.order.orders[0].p);
+    try std.testing.expectEqual(@as(u8, 20), decoded.action.order.orders[0].leverage);
 }
 
 pub fn encodeQueryRequest(allocator: std.mem.Allocator, req: protocol.QueryRequest) ![]u8 {
