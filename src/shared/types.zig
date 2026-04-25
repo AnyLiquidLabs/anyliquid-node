@@ -2,12 +2,27 @@ const std = @import("std");
 
 pub const Address = [20]u8;
 pub const AssetId = u64;
-pub const Price = u256;
-pub const Amount = u128;
+pub const Price = i64;
+pub const Amount = u64;
 pub const Quantity = Amount;
 pub const IpAddr = u128;
-pub const SignedAmount = i256;
-pub const PRICE_SCALE: Price = 1_000_000_000_000_000_000_000_000_000_000_000_000;
+pub const SignedAmount = i128;
+pub const PRICE_SCALE: Price = 1;
+pub const DEFAULT_PRICE_SCALE_EXP: u8 = 0;
+pub const DEFAULT_AMOUNT_SCALE_EXP: u8 = 0;
+
+pub const MarketScale = struct {
+    price_scale_exp: u8 = DEFAULT_PRICE_SCALE_EXP,
+    amount_scale_exp: u8 = DEFAULT_AMOUNT_SCALE_EXP,
+
+    pub fn priceScale(self: MarketScale) Price {
+        return pow10Signed(self.price_scale_exp);
+    }
+
+    pub fn amountScale(self: MarketScale) Quantity {
+        return pow10Unsigned(self.amount_scale_exp);
+    }
+};
 
 pub const Side = enum { long, short };
 
@@ -16,11 +31,31 @@ pub fn oppositeSide(side: Side) Side {
 }
 
 pub fn isValidPrice(price: Price, tick_size: Price) bool {
-    return price > 0 and price % tick_size == 0;
+    return price > 0 and tick_size > 0 and @rem(price, tick_size) == 0;
+}
+
+pub fn isValidQuantity(quantity: Quantity, lot_size: Quantity) bool {
+    return quantity > 0 and lot_size > 0 and quantity % lot_size == 0;
 }
 
 pub fn maxScaledPrice() Price {
-    return std.math.maxInt(Price) - (std.math.maxInt(Price) % PRICE_SCALE);
+    return std.math.maxInt(Price);
+}
+
+pub fn pow10Signed(exp: u8) Price {
+    std.debug.assert(exp <= 18);
+    var value: Price = 1;
+    var idx: u8 = 0;
+    while (idx < exp) : (idx += 1) value *= 10;
+    return value;
+}
+
+pub fn pow10Unsigned(exp: u8) Quantity {
+    std.debug.assert(exp <= 18);
+    var value: Quantity = 1;
+    var idx: u8 = 0;
+    while (idx < exp) : (idx += 1) value *= 10;
+    return value;
 }
 
 pub const TimeInForce = enum {
@@ -58,8 +93,14 @@ pub const AssetInfo = struct {
     name: []const u8,
     sz_decimals: u8,
     max_leverage: u8,
+    price_scale_exp: u8 = DEFAULT_PRICE_SCALE_EXP,
+    amount_scale_exp: u8 = DEFAULT_AMOUNT_SCALE_EXP,
     tick_size: Price,
     lot_size: Quantity,
+
+    pub fn scale(self: AssetInfo) MarketScale {
+        return .{ .price_scale_exp = self.price_scale_exp, .amount_scale_exp = self.amount_scale_exp };
+    }
 };
 
 pub const OrderWire = struct {

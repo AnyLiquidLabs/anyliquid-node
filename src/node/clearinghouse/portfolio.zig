@@ -62,8 +62,8 @@ pub const PortfolioMargin = struct {
     ) bool {
         _ = sub;
         // Check if global caps are hit
-        if (global_usdc_supply >= SUPPLY_CAP_USDC) return false;
-        if (global_usdc_borrow >= BORROW_CAP_USDC) return false;
+        if (global_usdc_supply > SUPPLY_CAP_USDC) return false;
+        if (global_usdc_borrow > BORROW_CAP_USDC) return false;
         return true;
     }
 
@@ -109,9 +109,9 @@ pub const PortfolioMargin = struct {
         const min_cap = @min(borrow_cap, @min(portfolio_balance, supply_cap));
         const capped_value: shared.types.Quantity = @intFromFloat(@as(f64, @floatFromInt(min_cap)) *
             @as(f64, @floatFromInt(borrow_oracle_price)) *
-            liquidation_threshold);
+            liquidation_threshold / @as(f64, @floatFromInt(types.USDC)));
 
-        return @intCast(@as(i256, @intCast(portfolio_balance)) + @as(i256, @intCast(capped_value)));
+        return @intCast(@as(i128, @intCast(portfolio_balance)) + @as(i128, @intCast(capped_value)));
     }
 
     /// Compute portfolio balance for a token.

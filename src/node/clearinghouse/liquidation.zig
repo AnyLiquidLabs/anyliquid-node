@@ -259,11 +259,11 @@ fn realizedPnlForSlice(
     close_size: shared.types.Quantity,
     close_price: shared.types.Price,
 ) shared.types.SignedAmount {
-    const diff: i256 = if (pos.side == .long)
-        @as(i256, @intCast(close_price)) - @as(i256, @intCast(pos.entry_price))
+    const diff: i128 = if (pos.side == .long)
+        @as(i128, close_price) - @as(i128, pos.entry_price)
     else
-        @as(i256, @intCast(pos.entry_price)) - @as(i256, @intCast(close_price));
-    return @intCast(@divTrunc(diff * @as(i512, @intCast(close_size)), shared.types.PRICE_SCALE));
+        @as(i128, pos.entry_price) - @as(i128, close_price);
+    return @intCast(@divTrunc(diff * @as(i128, @intCast(close_size)), shared.types.PRICE_SCALE));
 }
 
 test "scan finds account below maintenance margin" {
@@ -273,7 +273,7 @@ test "scan finds account below maintenance margin" {
     defer master.deinit();
 
     const sub = try master.openSubAccount(0, null, 0);
-    try sub.collateral.deposit(types.USDC_ID, 100 * types.USDC, &types.defaultCollateralRegistry);
+    try sub.collateral.deposit(types.USDC_ID, 100, &types.defaultCollateralRegistry);
 
     // Create a highly leveraged position
     sub.positions.put(1, .{
@@ -318,7 +318,10 @@ test "scan finds account below maintenance margin" {
     var engine = LiquidationEngine.init(alloc, 0, .{});
 
     const candidates = try engine.scanCandidates(&margin_engine, &masters, &state);
-    defer alloc.free(candidates);
+    defer {
+        for (candidates) |candidate| alloc.free(candidate.snapshot);
+        alloc.free(candidates);
+    }
 
     try std.testing.expect(candidates.len >= 1);
 }
@@ -330,7 +333,7 @@ test "liquidation surplus - credited to insurance fund" {
     defer master.deinit();
 
     const sub = try master.openSubAccount(0, null, 0);
-    try sub.collateral.deposit(types.USDC_ID, 10_000 * types.USDC, &types.defaultCollateralRegistry);
+    try sub.collateral.deposit(types.USDC_ID, 1, &types.defaultCollateralRegistry);
 
     sub.positions.put(1, .{
         .instrument_id = 1,
@@ -451,7 +454,7 @@ test "partial liquidation reduces position before full close" {
     defer master.deinit();
 
     const sub = try master.openSubAccount(0, null, 0);
-    try sub.collateral.deposit(types.USDC_ID, 11_000 * types.USDC, &types.defaultCollateralRegistry);
+    try sub.collateral.deposit(types.USDC_ID, 1, &types.defaultCollateralRegistry);
     sub.positions.put(1, .{
         .instrument_id = 1,
         .kind = .{ .perp = .{
@@ -539,8 +542,8 @@ test "ADL ranking - higher profit x leverage reduced first" {
         } },
         .user = [_]u8{2} ** 20,
         .size = 1,
-        .side = .short,
-        .entry_price = 90_000,
+        .side = .long,
+        .entry_price = 95_000,
         .realized_pnl = 0,
         .leverage = 20,
         .margin_mode = .isolated,

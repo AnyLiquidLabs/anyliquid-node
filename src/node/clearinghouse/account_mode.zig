@@ -146,7 +146,7 @@ test "daily action limit exceeded - rejected" {
 
     // Simulate 50k actions
     master.daily_actions.count = 50_000;
-    const now_ms: i64 = 1_700_000_000_000;
+    const now_ms: i64 = 1;
 
     try std.testing.expectError(
         error.DailyActionLimitExceeded,

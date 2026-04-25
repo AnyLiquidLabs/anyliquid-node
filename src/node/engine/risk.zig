@@ -9,8 +9,8 @@ pub const RiskError = error{
     PositionNotFound,
 };
 
-const MAINTENANCE_BPS: i256 = 500;
-const BPS_SCALE: i256 = 10_000;
+const MAINTENANCE_BPS: i128 = 500;
+const BPS_SCALE: i128 = 10_000;
 const DEFAULT_BALANCE: shared.types.Amount = 1_000_000_000;
 
 const AccountLedger = struct {
@@ -274,9 +274,9 @@ pub const RiskEngine = struct {
         var pos = entry.value_ptr;
         if (pos.side == (if (is_buy) shared.types.Side.long else .short)) {
             const total_size = pos.size + fill_size;
-            const weighted = (@as(u512, pos.entry_price) * @as(u512, pos.size)) +
-                (@as(u512, fill_px) * @as(u512, fill_size));
-            pos.entry_price = @intCast(weighted / @as(u512, total_size));
+            const weighted = (@as(i128, pos.entry_price) * @as(i128, @intCast(pos.size))) +
+                (@as(i128, fill_px) * @as(i128, @intCast(fill_size)));
+            pos.entry_price = @intCast(@divTrunc(weighted, @as(i128, @intCast(total_size))));
             pos.size = total_size;
             pos.leverage = leverage;
             return;
@@ -338,17 +338,17 @@ pub const RiskEngine = struct {
 };
 
 fn positionNotional(size: shared.types.Quantity, price: shared.types.Price) shared.types.Price {
-    return @intCast((@as(u512, size) * @as(u512, price)) / @as(u512, shared.types.PRICE_SCALE));
+    return @intCast(@divTrunc(@as(i128, @intCast(size)) * @as(i128, price), shared.types.PRICE_SCALE));
 }
 
 fn maintenanceMarginRequired(size: shared.types.Quantity, price: shared.types.Price) shared.types.SignedAmount {
     const notional = positionNotional(size, price);
-    return @intCast(@divTrunc((@as(i512, @intCast(notional)) * MAINTENANCE_BPS), BPS_SCALE));
+    return @intCast(@divTrunc((@as(i128, notional) * MAINTENANCE_BPS), BPS_SCALE));
 }
 
 fn initialMarginRequired(size: shared.types.Quantity, price: shared.types.Price, leverage: u8) shared.types.SignedAmount {
     const notional = positionNotional(size, price);
-    return @intCast(@divTrunc(@as(i512, @intCast(notional)), @as(i512, @intCast(leverage))));
+    return @intCast(@divTrunc(@as(i128, notional), @as(i128, @intCast(leverage))));
 }
 
 pub fn adlRank(pos: *const shared.types.Position, mark_px: shared.types.Price) f64 {

@@ -1140,8 +1140,8 @@ pub fn encodeQueryResponse(allocator: std.mem.Allocator, resp: protocol.QueryRes
     switch (resp) {
         .user_state => |state| {
             try buf.appendSlice(allocator, &state.address);
-            var bal_bytes: [16]u8 = undefined;
-            std.mem.writeInt(u128, &bal_bytes, state.balance, .big);
+            var bal_bytes: [8]u8 = undefined;
+            std.mem.writeInt(u64, &bal_bytes, state.balance, .big);
             try buf.appendSlice(allocator, &bal_bytes);
         },
         .open_orders => |orders| {
@@ -1175,7 +1175,7 @@ pub fn decodeQueryResponse(allocator: std.mem.Allocator, data: []const u8) !prot
     return switch (tag) {
         0x81 => .{ .user_state = .{
             .address = data[1..21].*,
-            .balance = std.mem.readInt(u128, data[21..37], .big),
+            .balance = std.mem.readInt(u64, data[21..29], .big),
             .positions = &.{},
             .open_orders = &.{},
             .api_wallet = null,

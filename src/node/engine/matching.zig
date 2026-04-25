@@ -7,9 +7,28 @@ pub const MatchingError = error{
     AssetNotFound,
     FokCannotFill,
     InvalidPriceScale,
+    InvalidQuantityScale,
     OrderNotFound,
     WouldTakeNotPost,
 } || risk_mod.RiskError || std.mem.Allocator.Error;
+
+const MarketConfig = struct {
+    scale: shared.types.MarketScale = .{},
+    tick_size: shared.types.Price = shared.types.PRICE_SCALE,
+    lot_size: shared.types.Quantity = 1,
+
+    fn fromScale(price_scale_exp: u8, amount_scale_exp: u8) MarketConfig {
+        const scale: shared.types.MarketScale = .{
+            .price_scale_exp = price_scale_exp,
+            .amount_scale_exp = amount_scale_exp,
+        };
+        return .{
+            .scale = scale,
+            .tick_size = scale.priceScale(),
+            .lot_size = scale.amountScale(),
+        };
+    }
+};
 
 const BookOrder = struct {
     order: shared.types.Order,
@@ -18,18 +37,30 @@ const BookOrder = struct {
     trigger: ?shared.types.TriggerOrderType = null,
 };
 
+const PriceLevel = struct {
+    price: shared.types.Price,
+    order_ids: std.ArrayList(u64) = .empty,
+    total_qty: shared.types.Quantity = 0,
+
+    fn deinit(self: *PriceLevel, allocator: std.mem.Allocator) void {
+        self.order_ids.deinit(allocator);
+    }
+};
+
 const OrderBook = struct {
     asset_id: shared.types.AssetId,
-    bids: std.ArrayList(u64),
-    asks: std.ArrayList(u64),
+    config: MarketConfig,
+    bids: std.ArrayList(PriceLevel),
+    asks: std.ArrayList(PriceLevel),
     triggers: std.ArrayList(u64),
     orders: std.AutoHashMap(u64, BookOrder),
     cloid_map: std.AutoHashMap([16]u8, u64),
     seq: u64 = 0,
 
-    fn init(asset_id: shared.types.AssetId, allocator: std.mem.Allocator) OrderBook {
+    fn init(asset_id: shared.types.AssetId, config: MarketConfig, allocator: std.mem.Allocator) OrderBook {
         return .{
             .asset_id = asset_id,
+            .config = config,
             .bids = .empty,
             .asks = .empty,
             .triggers = .empty,
@@ -39,6 +70,8 @@ const OrderBook = struct {
     }
 
     fn deinit(self: *OrderBook, allocator: std.mem.Allocator) void {
+        for (self.bids.items) |*level| level.deinit(allocator);
+        for (self.asks.items) |*level| level.deinit(allocator);
         self.cloid_map.deinit();
         self.orders.deinit();
         self.triggers.deinit(allocator);
@@ -51,6 +84,7 @@ pub const MatchingEngine = struct {
     allocator: std.mem.Allocator,
     risk: *risk_mod.RiskEngine,
     books: std.AutoHashMap(shared.types.AssetId, OrderBook),
+    market_configs: std.AutoHashMap(shared.types.AssetId, MarketConfig),
     order_asset: std.AutoHashMap(u64, shared.types.AssetId),
     next_order_id: u64 = 1,
     next_seq: u64 = 1,
@@ -60,6 +94,7 @@ pub const MatchingEngine = struct {
             .allocator = allocator,
             .risk = risk,
             .books = std.AutoHashMap(shared.types.AssetId, OrderBook).init(allocator),
+            .market_configs = std.AutoHashMap(shared.types.AssetId, MarketConfig).init(allocator),
             .order_asset = std.AutoHashMap(u64, shared.types.AssetId).init(allocator),
         };
     }
@@ -70,7 +105,21 @@ pub const MatchingEngine = struct {
             entry.value_ptr.deinit(self.allocator);
         }
         self.order_asset.deinit();
+        self.market_configs.deinit();
         self.books.deinit();
+    }
+
+    pub fn configureMarket(
+        self: *MatchingEngine,
+        asset_id: shared.types.AssetId,
+        price_scale_exp: u8,
+        amount_scale_exp: u8,
+    ) !void {
+        const config = MarketConfig.fromScale(price_scale_exp, amount_scale_exp);
+        try self.market_configs.put(asset_id, config);
+        if (self.books.getPtr(asset_id)) |book| {
+            if (book.orders.count() == 0 and book.triggers.items.len == 0) book.config = config;
+        }
     }
 
     pub fn placeOrder(
@@ -88,21 +137,7 @@ pub const MatchingEngine = struct {
             self.next_order_id += 1;
         }
 
-        switch (normalized.order_type) {
-            .limit => {
-                if (!shared.types.isValidPrice(normalized.price, defaultTickSize())) {
-                    return error.InvalidPriceScale;
-                }
-            },
-            .trigger => |trigger| {
-                if (!shared.types.isValidPrice(trigger.trigger_px, defaultTickSize())) {
-                    return error.InvalidPriceScale;
-                }
-                if (!trigger.is_market and !shared.types.isValidPrice(normalized.price, defaultTickSize())) {
-                    return error.InvalidPriceScale;
-                }
-            },
-        }
+        try validateOrderScales(normalized, book.config);
 
         switch (normalized.order_type) {
             .trigger => {
@@ -115,12 +150,8 @@ pub const MatchingEngine = struct {
 
         switch (normalized.order_type) {
             .limit => |tif| {
-                if (tif == .fok and !self.canFullyFill(book, normalized)) {
-                    return error.FokCannotFill;
-                }
-                if (tif == .alo and wouldCross(book, normalized)) {
-                    return error.WouldTakeNotPost;
-                }
+                if (tif == .fok and !self.canFullyFill(book, normalized)) return error.FokCannotFill;
+                if (tif == .alo and wouldCross(book, normalized)) return error.WouldTakeNotPost;
             },
             .trigger => unreachable,
         }
@@ -134,9 +165,7 @@ pub const MatchingEngine = struct {
 
         switch (normalized.order_type) {
             .limit => |tif| switch (tif) {
-                .gtc, .alo => {
-                    if (taker.remaining > 0) try self.insertResting(book, taker);
-                },
+                .gtc, .alo => if (taker.remaining > 0) try self.insertResting(book, taker),
                 .ioc, .fok => {},
             },
             .trigger => unreachable,
@@ -211,32 +240,18 @@ pub const MatchingEngine = struct {
         var books_it = self.books.iterator();
         while (books_it.next()) |entry| {
             const asset_id = entry.key_ptr.*;
-            if (req.asset_id) |filter_asset_id| {
-                if (filter_asset_id != asset_id) continue;
-            }
+            if (req.asset_id) |filter_asset_id| if (filter_asset_id != asset_id) continue;
 
             const book = entry.value_ptr;
             var to_remove = std.ArrayList(u64).empty;
             defer to_remove.deinit(self.allocator);
 
-            for (book.bids.items) |order_id| {
-                const record = book.orders.get(order_id) orelse continue;
-                if (std.mem.eql(u8, record.order.user[0..], user[0..])) {
-                    try to_remove.append(self.allocator, order_id);
-                }
-            }
-            for (book.asks.items) |order_id| {
-                const record = book.orders.get(order_id) orelse continue;
-                if (std.mem.eql(u8, record.order.user[0..], user[0..])) {
-                    try to_remove.append(self.allocator, order_id);
-                }
-            }
+            try collectUserOrders(book, book.bids.items, user, &to_remove, self.allocator);
+            try collectUserOrders(book, book.asks.items, user, &to_remove, self.allocator);
             if (req.include_triggers) {
                 for (book.triggers.items) |order_id| {
                     const record = book.orders.get(order_id) orelse continue;
-                    if (std.mem.eql(u8, record.order.user[0..], user[0..])) {
-                        try to_remove.append(self.allocator, order_id);
-                    }
+                    if (std.mem.eql(u8, record.order.user[0..], user[0..])) try to_remove.append(self.allocator, order_id);
                 }
             }
 
@@ -244,9 +259,7 @@ pub const MatchingEngine = struct {
                 try self.removeOrder(book, order_id);
                 cancelled += 1;
             }
-            if (to_remove.items.len > 0) {
-                try touched_assets.put(asset_id, {});
-            }
+            if (to_remove.items.len > 0) try touched_assets.put(asset_id, {});
         }
 
         try self.publishTouchedBooks(&touched_assets, state);
@@ -259,12 +272,12 @@ pub const MatchingEngine = struct {
         price: shared.types.Price,
         state: *state_mod.GlobalState,
     ) MatchingError![]shared.types.Fill {
-        if (!shared.types.isValidPrice(price, defaultTickSize())) return error.InvalidPriceScale;
+        const book = self.books.getPtr(asset_id) orelse return &.{};
+        if (!shared.types.isValidPrice(price, book.config.tick_size)) return error.InvalidPriceScale;
 
         var fills = std.ArrayList(shared.types.Fill).empty;
         defer fills.deinit(self.allocator);
 
-        const book = self.books.getPtr(asset_id) orelse return fills.toOwnedSlice(self.allocator);
         var idx: usize = 0;
         while (idx < book.triggers.items.len) {
             const order_id = book.triggers.items[idx];
@@ -307,9 +320,9 @@ pub const MatchingEngine = struct {
         depth: u32,
     ) !shared.types.L2Snapshot {
         const book = self.books.getPtr(asset_id) orelse return error.AssetNotFound;
-        const bids = try aggregateSide(self.allocator, book, .bids, depth);
+        const bids = try aggregateSide(self.allocator, book.bids.items, depth);
         errdefer self.allocator.free(bids);
-        const asks = try aggregateSide(self.allocator, book, .asks, depth);
+        const asks = try aggregateSide(self.allocator, book.asks.items, depth);
         errdefer self.allocator.free(asks);
 
         return .{
@@ -324,7 +337,8 @@ pub const MatchingEngine = struct {
     fn ensureBook(self: *MatchingEngine, asset_id: shared.types.AssetId) !*OrderBook {
         const gop = try self.books.getOrPut(asset_id);
         if (!gop.found_existing) {
-            gop.value_ptr.* = OrderBook.init(asset_id, self.allocator);
+            const config = self.market_configs.get(asset_id) orelse MarketConfig{};
+            gop.value_ptr.* = OrderBook.init(asset_id, config, self.allocator);
         }
         return gop.value_ptr;
     }
@@ -347,9 +361,11 @@ pub const MatchingEngine = struct {
         try self.order_asset.put(record.order.id, record.order.asset_id);
         if (record.order.cloid) |cloid| try book.cloid_map.put(cloid, record.order.id);
 
-        const side = if (record.order.is_buy) &book.bids else &book.asks;
-        const index = findInsertIndex(book, side.items, record.order.id, record);
-        try side.insert(self.allocator, index, record.order.id);
+        const levels = if (record.order.is_buy) &book.bids else &book.asks;
+        const level_index = try ensureLevel(self.allocator, levels, record.order.price, record.order.is_buy);
+        const level = &levels.items[level_index];
+        try level.order_ids.append(self.allocator, record.order.id);
+        level.total_qty += record.remaining;
     }
 
     fn matchAgainstBook(
@@ -362,31 +378,44 @@ pub const MatchingEngine = struct {
         const maker_side = if (taker.order.is_buy) &book.asks else &book.bids;
 
         while (taker.remaining > 0 and maker_side.items.len > 0) {
-            const maker_id = maker_side.items[0];
-            const maker = book.orders.getPtr(maker_id).?;
-            if (!crosses(taker.order.is_buy, taker.order.price, maker.order.price)) break;
+            const level = &maker_side.items[0];
+            if (!crosses(taker.order.is_buy, taker.order.price, level.price)) break;
 
-            const fill_size = @min(taker.remaining, maker.remaining);
-            try self.risk.onFill(&taker.order, &maker.order, fill_size, maker.order.price, state);
+            while (taker.remaining > 0 and level.order_ids.items.len > 0) {
+                const maker_id = level.order_ids.items[0];
+                const maker = book.orders.getPtr(maker_id).?;
+                const fill_size = @min(taker.remaining, maker.remaining);
+                try self.risk.onFill(&taker.order, &maker.order, fill_size, maker.order.price, state);
 
-            try fills.append(self.allocator, .{
-                .taker_order_id = taker.order.id,
-                .maker_order_id = maker.order.id,
-                .asset_id = taker.order.asset_id,
-                .price = maker.order.price,
-                .size = fill_size,
-                .taker_addr = taker.order.user,
-                .maker_addr = maker.order.user,
-                .timestamp = state.timestamp,
-                .fee = 0,
-            });
+                try fills.append(self.allocator, .{
+                    .taker_order_id = taker.order.id,
+                    .maker_order_id = maker.order.id,
+                    .asset_id = taker.order.asset_id,
+                    .price = maker.order.price,
+                    .size = fill_size,
+                    .taker_addr = taker.order.user,
+                    .maker_addr = maker.order.user,
+                    .timestamp = state.timestamp,
+                    .fee = 0,
+                });
 
-            taker.remaining -= fill_size;
-            maker.remaining -= fill_size;
-            state.timestamp += 1;
+                taker.remaining -= fill_size;
+                maker.remaining -= fill_size;
+                level.total_qty -= fill_size;
+                state.timestamp += 1;
 
-            if (maker.remaining == 0) {
-                try self.removeOrder(book, maker_id);
+                if (maker.remaining == 0) {
+                    _ = level.order_ids.orderedRemove(0);
+                    const removed = book.orders.fetchRemove(maker_id).?;
+                    if (removed.value.order.cloid) |cloid| _ = book.cloid_map.remove(cloid);
+                    _ = self.order_asset.remove(maker_id);
+                    book.seq += 1;
+                }
+            }
+
+            if (level.order_ids.items.len == 0) {
+                level.deinit(self.allocator);
+                _ = maker_side.orderedRemove(0);
             }
         }
     }
@@ -398,10 +427,9 @@ pub const MatchingEngine = struct {
 
         if (record.trigger != null) {
             removeFromIdList(&book.triggers, order_id);
-        } else if (record.order.is_buy) {
-            removeFromIdList(&book.bids, order_id);
         } else {
-            removeFromIdList(&book.asks, order_id);
+            const levels = if (record.order.is_buy) &book.bids else &book.asks;
+            removeFromLevels(self.allocator, levels, order_id, record.order.price, record.remaining);
         }
 
         _ = book.orders.remove(order_id);
@@ -412,11 +440,10 @@ pub const MatchingEngine = struct {
         _ = self;
         const maker_side = if (order.is_buy) book.asks.items else book.bids.items;
         var remaining = order.size;
-        for (maker_side) |maker_id| {
-            const maker = book.orders.get(maker_id).?;
-            if (!crosses(order.is_buy, order.price, maker.order.price)) break;
-            if (maker.remaining >= remaining) return true;
-            remaining -= maker.remaining;
+        for (maker_side) |level| {
+            if (!crosses(order.is_buy, order.price, level.price)) break;
+            if (level.total_qty >= remaining) return true;
+            remaining -= level.total_qty;
         }
         return remaining == 0;
     }
@@ -441,41 +468,83 @@ pub const MatchingEngine = struct {
     }
 };
 
+fn validateOrderScales(order: shared.types.Order, config: MarketConfig) MatchingError!void {
+    if (!shared.types.isValidQuantity(order.size, config.lot_size)) return error.InvalidQuantityScale;
+    switch (order.order_type) {
+        .limit => if (!shared.types.isValidPrice(order.price, config.tick_size)) return error.InvalidPriceScale,
+        .trigger => |trigger| {
+            if (!shared.types.isValidPrice(trigger.trigger_px, config.tick_size)) return error.InvalidPriceScale;
+            if (!trigger.is_market and !shared.types.isValidPrice(order.price, config.tick_size)) return error.InvalidPriceScale;
+        },
+    }
+}
+
+fn collectUserOrders(
+    book: *const OrderBook,
+    levels: []const PriceLevel,
+    user: shared.types.Address,
+    out: *std.ArrayList(u64),
+    allocator: std.mem.Allocator,
+) !void {
+    for (levels) |level| {
+        for (level.order_ids.items) |order_id| {
+            const record = book.orders.get(order_id) orelse continue;
+            if (std.mem.eql(u8, record.order.user[0..], user[0..])) try out.append(allocator, order_id);
+        }
+    }
+}
+
 fn aggregateSide(
     allocator: std.mem.Allocator,
-    book: *const OrderBook,
-    comptime side: enum { bids, asks },
+    levels: []const PriceLevel,
     depth: u32,
 ) ![]shared.types.Level {
     var out = std.ArrayList(shared.types.Level).empty;
     defer out.deinit(allocator);
 
-    const ids = switch (side) {
-        .bids => book.bids.items,
-        .asks => book.asks.items,
-    };
-
-    var current_price: ?shared.types.Price = null;
-    var current_size: shared.types.Quantity = 0;
-    for (ids) |order_id| {
-        const order = book.orders.get(order_id).?;
-        if (current_price == null or current_price.? != order.order.price) {
-            if (current_price != null) {
-                try out.append(allocator, .{ .price = current_price.?, .size = current_size });
-                if (out.items.len >= depth) break;
-            }
-            current_price = order.order.price;
-            current_size = order.remaining;
-        } else {
-            current_size += order.remaining;
-        }
-    }
-
-    if (current_price != null and out.items.len < depth) {
-        try out.append(allocator, .{ .price = current_price.?, .size = current_size });
+    for (levels) |level| {
+        try out.append(allocator, .{ .price = level.price, .size = level.total_qty });
+        if (out.items.len >= depth) break;
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+fn ensureLevel(
+    allocator: std.mem.Allocator,
+    levels: *std.ArrayList(PriceLevel),
+    price: shared.types.Price,
+    is_bid: bool,
+) !usize {
+    var idx: usize = 0;
+    while (idx < levels.items.len) : (idx += 1) {
+        const current = levels.items[idx].price;
+        if (current == price) return idx;
+        if ((is_bid and price > current) or (!is_bid and price < current)) break;
+    }
+    try levels.insert(allocator, idx, .{ .price = price });
+    return idx;
+}
+
+fn removeFromLevels(
+    allocator: std.mem.Allocator,
+    levels: *std.ArrayList(PriceLevel),
+    order_id: u64,
+    price: shared.types.Price,
+    remaining: shared.types.Quantity,
+) void {
+    var level_idx: usize = 0;
+    while (level_idx < levels.items.len) : (level_idx += 1) {
+        const level = &levels.items[level_idx];
+        if (level.price != price) continue;
+        removeFromIdList(&level.order_ids, order_id);
+        level.total_qty -= @min(level.total_qty, remaining);
+        if (level.order_ids.items.len == 0) {
+            level.deinit(allocator);
+            _ = levels.orderedRemove(level_idx);
+        }
+        return;
+    }
 }
 
 fn removeFromIdList(list: *std.ArrayList(u64), order_id: u64) void {
@@ -486,24 +555,6 @@ fn removeFromIdList(list: *std.ArrayList(u64), order_id: u64) void {
             return;
         }
     }
-}
-
-fn findInsertIndex(book: *const OrderBook, ids: []const u64, order_id: u64, record: BookOrder) usize {
-    _ = order_id;
-    var idx: usize = 0;
-    while (idx < ids.len) : (idx += 1) {
-        const candidate = book.orders.get(ids[idx]).?;
-        if (better(record, candidate)) return idx;
-    }
-    return ids.len;
-}
-
-fn better(lhs: BookOrder, rhs: BookOrder) bool {
-    if (lhs.order.is_buy != rhs.order.is_buy) return lhs.order.is_buy;
-    if (lhs.order.price != rhs.order.price) {
-        return if (lhs.order.is_buy) lhs.order.price > rhs.order.price else lhs.order.price < rhs.order.price;
-    }
-    return lhs.placed_seq < rhs.placed_seq;
 }
 
 fn crosses(is_buy: bool, taker_price: shared.types.Price, maker_price: shared.types.Price) bool {
@@ -521,19 +572,15 @@ fn wouldCross(book: *const OrderBook, order: shared.types.Order) bool {
 
 fn bestBid(book: *const OrderBook) ?shared.types.Price {
     if (book.bids.items.len == 0) return null;
-    return book.orders.get(book.bids.items[0]).?.order.price;
+    return book.bids.items[0].price;
 }
 
 fn bestAsk(book: *const OrderBook) ?shared.types.Price {
     if (book.asks.items.len == 0) return null;
-    return book.orders.get(book.asks.items[0]).?.order.price;
+    return book.asks.items[0].price;
 }
 
 fn shouldTrigger(is_buy: bool, trigger: shared.types.TriggerOrderType, price: shared.types.Price) bool {
     _ = trigger.tpsl;
     return if (is_buy) price >= trigger.trigger_px else price <= trigger.trigger_px;
-}
-
-fn defaultTickSize() shared.types.Price {
-    return shared.types.PRICE_SCALE;
 }

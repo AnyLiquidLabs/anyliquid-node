@@ -36,7 +36,7 @@ pub const SpotClearingUnit = struct {
     }
 
     pub fn calcFee(quote_amount: shared.types.Quantity, fee_bps: u32) shared.types.Quantity {
-        return @divTrunc(quote_amount * @as(shared.types.Quantity, @intCast(fee_bps)), 10_000);
+        return @intCast(@divTrunc(@as(u128, quote_amount) * @as(u128, fee_bps), 10_000));
     }
 };
 
@@ -77,5 +77,5 @@ test "spot buy fill - base to taker, quote to maker" {
     _ = try unit.settle(fill, taker, maker);
 
     try std.testing.expect(taker.collateral.rawBalance(types.BTC_ID) == 1);
-    try std.testing.expect(maker.collateral.rawBalance(types.USDC_ID) > 49_000 * types.USDC);
+    try std.testing.expect(maker.collateral.rawBalance(types.USDC_ID) > 49_000);
 }

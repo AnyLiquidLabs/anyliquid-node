@@ -14,6 +14,12 @@ const CloidKey = struct {
     cloid: [16]u8,
 };
 
+const MatchCandidate = struct {
+    user: shared.types.Address,
+    order_id: u64,
+    price: shared.types.Price,
+};
+
 pub const ExecutionReceipt = struct {
     user: shared.types.Address,
     nonce: u64,
@@ -64,7 +70,7 @@ pub const BlockExecutor = struct {
         user: shared.types.Address,
         asset_id: ch_types.AssetId,
         amount: shared.types.Quantity,
-    ) !void {
+    ) anyerror!void {
         const master = try self.ensureMaster(user);
         _ = try self.clearinghouse.executeDeposit(0, asset_id, amount, master, &self.marginState(nextBlockTimestamp(self.state)));
         try self.syncUserAccount(user);
@@ -193,7 +199,7 @@ pub const BlockExecutor = struct {
         events_out: *std.ArrayList(shared.protocol.NodeEvent),
         touched_users: *std.AutoHashMap(shared.types.Address, void),
     ) !shared.protocol.ActionAck {
-        self.ensureMaster(tx.user) catch |err| return try rejectedAck(self.allocator, err);
+        _ = self.ensureMaster(tx.user) catch |err| return try rejectedAck(self.allocator, err);
         self.clearinghouse.checkDailyAction(self.masters.getPtr(tx.user).?, now_ms) catch |err| {
             return try rejectedAck(self.allocator, err);
         };
@@ -256,7 +262,7 @@ pub const BlockExecutor = struct {
         reduce_only: bool,
         events_out: *std.ArrayList(shared.protocol.NodeEvent),
         touched_users: *std.AutoHashMap(shared.types.Address, void),
-    ) !shared.types.OrderStatus {
+    ) anyerror!shared.types.OrderStatus {
         const master = try self.ensureMaster(user);
         const sub = master.subAccountByIndex(0).?;
         const instrument_kind = defaultInstrumentKind(order.asset_id);
@@ -523,8 +529,8 @@ pub const BlockExecutor = struct {
     fn bestMatchCandidate(
         self: *BlockExecutor,
         order: shared.types.Order,
-    ) ?struct { user: shared.types.Address, order_id: u64, price: shared.types.Price } {
-        var best: ?struct { user: shared.types.Address, order_id: u64, price: shared.types.Price } = null;
+    ) ?MatchCandidate {
+        var best: ?MatchCandidate = null;
 
         var accounts_it = self.state.accounts.iterator();
         while (accounts_it.next()) |account_entry| {
@@ -721,7 +727,7 @@ pub const BlockExecutor = struct {
         const best_bid = self.bestOppositePrice(asset_id, true);
         const best_ask = self.bestOppositePrice(asset_id, false);
         if (best_bid != null and best_ask != null) {
-            return @intCast((@as(u512, best_bid.?) + @as(u512, best_ask.?)) / 2);
+            return @intCast(@divTrunc(@as(i128, best_bid.?) + @as(i128, best_ask.?), 2));
         }
         return best_bid orelse best_ask;
     }
@@ -996,7 +1002,7 @@ pub const BlockExecutor = struct {
         for (candidates) |candidate| {
             const located = self.findSubAccountByAddress(candidate.user) orelse continue;
             const first_pos = if (candidate.snapshot.len > 0) candidate.snapshot[0] else null;
-            const result = try self.clearinghouse.executeLiquidation(candidate, located.sub, &margin_state);
+            _ = try self.clearinghouse.executeLiquidation(candidate, located.sub, &margin_state);
             if (first_pos) |pos| {
                 const mark_px = margin_state.freshMarkPrice(pos.instrument_id) orelse pos.entry_price;
                 try events_out.append(self.allocator, .{ .liquidation = .{
@@ -1005,8 +1011,6 @@ pub const BlockExecutor = struct {
                     .size = pos.size,
                     .side = pos.side,
                     .mark_px = mark_px,
-                    .pnl = result.insurance_fund_delta,
-                    .insurance_fund_delta = result.insurance_fund_delta,
                 } });
             }
             try self.syncUserAccount(located.master);
@@ -1198,7 +1202,7 @@ fn buildOpenOrdersView(
 }
 
 fn parsePrice(value: []const u8) !shared.types.Price {
-    return try parseScaledDecimal(shared.types.Price, value, 36, shared.types.PRICE_SCALE);
+    return try parseScaledDecimal(shared.types.Price, value, shared.types.DEFAULT_PRICE_SCALE_EXP, shared.types.PRICE_SCALE);
 }
 
 fn parseQuantity(value: []const u8) !shared.types.Quantity {
@@ -1290,8 +1294,8 @@ fn computeStateRoot(allocator: std.mem.Allocator, state: *const state_mod.Global
         const account = state.accounts.get(address).?;
         hasher.update(address[0..]);
 
-        var balance_bytes: [16]u8 = undefined;
-        std.mem.writeInt(u128, &balance_bytes, account.balance, .big);
+        var balance_bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &balance_bytes, account.balance, .big);
         hasher.update(&balance_bytes);
 
         var position_keys = std.ArrayList(shared.types.AssetId).empty;
@@ -1311,8 +1315,8 @@ fn computeStateRoot(allocator: std.mem.Allocator, state: *const state_mod.Global
             std.mem.writeInt(u64, &asset_bytes, asset_id, .big);
             hasher.update(&asset_bytes);
             hasher.update(&[_]u8{@intFromEnum(pos.side)});
-            var size_bytes: [16]u8 = undefined;
-            std.mem.writeInt(u128, &size_bytes, pos.size, .big);
+            var size_bytes: [8]u8 = undefined;
+            std.mem.writeInt(u64, &size_bytes, pos.size, .big);
             hasher.update(&size_bytes);
         }
 
@@ -1359,7 +1363,7 @@ fn crosses(is_buy: bool, taker_price: shared.types.Price, maker_price: shared.ty
 fn betterMatch(
     taker_is_buy: bool,
     candidate: shared.types.Order,
-    best: struct { user: shared.types.Address, order_id: u64, price: shared.types.Price },
+    best: MatchCandidate,
 ) bool {
     if (candidate.price != best.price) {
         return if (taker_is_buy) candidate.price < best.price else candidate.price > best.price;

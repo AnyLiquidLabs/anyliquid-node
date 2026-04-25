@@ -81,7 +81,7 @@ pub const OptionsClearingUnit = struct {
                 const total_size = pos.size + fill.size;
                 const old_notional = shared.fixed_point.mulPriceQty(pos.entry_price, pos.size);
                 const new_notional = shared.fixed_point.mulPriceQty(fill.price, fill.size);
-                pos.entry_price = @divTrunc(old_notional + new_notional, total_size);
+                pos.entry_price = @intCast(@divTrunc(old_notional + new_notional, total_size));
                 pos.size = total_size;
                 pos.isolated_margin += quote_amount + fee;
             } else {
@@ -203,11 +203,11 @@ pub const OptionsClearingUnit = struct {
 const spot_mod = @import("spot.zig");
 
 fn calcOptionPnl(pos: *const types.Position, close_size: shared.types.Quantity, close_price: shared.types.Price) shared.types.SignedAmount {
-    const diff: i256 = if (pos.side == .long)
-        @as(i256, @intCast(close_price)) - @as(i256, @intCast(pos.entry_price))
+    const diff: i128 = if (pos.side == .long)
+        @as(i128, close_price) - @as(i128, pos.entry_price)
     else
-        @as(i256, @intCast(pos.entry_price)) - @as(i256, @intCast(close_price));
-    return @intCast(@divTrunc(diff * @as(i512, @intCast(close_size)), shared.types.PRICE_SCALE));
+        @as(i128, pos.entry_price) - @as(i128, close_price);
+    return @intCast(@divTrunc(diff * @as(i128, @intCast(close_size)), shared.types.PRICE_SCALE));
 }
 
 pub const GlobalState = struct {

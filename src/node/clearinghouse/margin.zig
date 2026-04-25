@@ -249,7 +249,7 @@ pub const GlobalState = struct {
 
     pub fn isWithinTradeBand(self: *const GlobalState, reference_price: shared.types.Price, trade_price: shared.types.Price) bool {
         if (reference_price == 0) return true;
-        const lower_delta: shared.types.Price = @as(shared.types.Price, @intCast((@as(u512, reference_price) * self.max_trade_price_deviation_bps) / 10_000));
+        const lower_delta: shared.types.Price = @intCast(@divTrunc(@as(i128, reference_price) * self.max_trade_price_deviation_bps, 10_000));
         const upper = reference_price + lower_delta;
         const lower = if (reference_price > lower_delta) reference_price - lower_delta else 0;
         return trade_price >= lower and trade_price <= upper;
@@ -612,11 +612,35 @@ test "portfolio margin ratio changes with oracle price" {
     const sub = try master.openSubAccount(0, null, 0);
     sub.master_mode = .portfolio_margin;
     try sub.collateral.deposit(types.USDC_ID, 1_000_000 * types.USDC, &types.defaultCollateralRegistry);
+    sub.positions.put(1, .{
+        .instrument_id = 1,
+        .kind = .{ .perp = .{
+            .tick_size = 1,
+            .lot_size = 1,
+            .max_leverage = 50,
+            .funding_interval_ms = 3_600_000,
+            .mark_method = .oracle,
+            .isolated_only = false,
+        } },
+        .user = sub.address,
+        .size = 10,
+        .side = .long,
+        .entry_price = 100_000,
+        .realized_pnl = 0,
+        .leverage = 50,
+        .margin_mode = .cross,
+        .isolated_margin = 0,
+        .funding_index = 0,
+        .delta = 0,
+        .gamma = 0,
+        .vega = 0,
+        .theta = 0,
+    }) catch {};
 
     const low_oracle_state = GlobalState{
         .markPriceFn = struct {
             fn mark(_: types.InstrumentId) ?shared.types.Price {
-                return null;
+                return 100_000;
             }
         }.mark,
         .assetOraclePriceFn = struct {

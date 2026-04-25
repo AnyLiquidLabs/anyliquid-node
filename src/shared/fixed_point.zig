@@ -4,17 +4,18 @@ const types = @import("types.zig");
 pub const PRICE_DECIMALS: types.Price = types.PRICE_SCALE;
 pub const QUANTITY_DECIMALS: types.Quantity = 1;
 
-pub fn priceFromWhole(value: u128) types.Price {
-    return @as(types.Price, value) * PRICE_DECIMALS;
+pub fn priceFromWhole(value: i64) types.Price {
+    return value * PRICE_DECIMALS;
 }
 
-pub fn quantityFromWhole(value: u128) types.Quantity {
-    return @as(types.Quantity, value);
+pub fn quantityFromWhole(value: u64) types.Quantity {
+    return value;
 }
 
 pub fn mulPriceQty(price: types.Price, qty: types.Quantity) types.Quantity {
-    const result = @as(u512, price) * @as(u512, qty);
-    return @intCast(result / PRICE_DECIMALS);
+    std.debug.assert(price >= 0);
+    const result = @as(u128, @intCast(price)) * @as(u128, qty);
+    return @intCast(result / @as(u128, @intCast(PRICE_DECIMALS)));
 }
 
 test "fixed-point helpers preserve scaling expectations" {

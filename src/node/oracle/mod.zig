@@ -331,7 +331,7 @@ fn isWithinDeviation(
         candidate_price - reference_price
     else
         reference_price - candidate_price;
-    const deviation_bps = (@as(u512, diff) * 10_000) / @as(u512, reference_price);
+    const deviation_bps = @divTrunc(@as(i128, diff) * 10_000, @as(i128, reference_price));
     return deviation_bps <= max_deviation_bps;
 }
 

@@ -188,13 +188,13 @@ pub const PerpEngine = struct {
     }
 
     pub fn unrealizedPnl(pos: *const shared.types.Position, mark_px: shared.types.Price) shared.types.SignedAmount {
-        const price_delta: i512 = switch (pos.side) {
-            .long => @as(i512, @intCast(mark_px)) - @as(i512, @intCast(pos.entry_price)),
-            .short => @as(i512, @intCast(pos.entry_price)) - @as(i512, @intCast(mark_px)),
+        const price_delta: i128 = switch (pos.side) {
+            .long => @as(i128, mark_px) - @as(i128, pos.entry_price),
+            .short => @as(i128, pos.entry_price) - @as(i128, mark_px),
         };
         const pnl = @divTrunc(
-            price_delta * @as(i512, @intCast(pos.size)),
-            @as(i512, @intCast(shared.types.PRICE_SCALE)),
+            price_delta * @as(i128, @intCast(pos.size)),
+            @as(i128, shared.types.PRICE_SCALE),
         );
         return @intCast(pnl);
     }
@@ -202,13 +202,13 @@ pub const PerpEngine = struct {
 
 fn calcBookMid(best_bid: ?shared.types.Price, best_ask: ?shared.types.Price) ?shared.types.Price {
     return if (best_bid != null and best_ask != null)
-        @intCast((@as(u512, best_bid.?) + @as(u512, best_ask.?)) / 2)
+        @intCast(@divTrunc(@as(i128, best_bid.?) + @as(i128, best_ask.?), 2))
     else
         best_bid orelse best_ask;
 }
 
 fn calcMarkPrice(mid: shared.types.Price, index_px: shared.types.Price) shared.types.Price {
-    const max_dev: shared.types.Price = @intCast((@as(u512, index_px) * 5) / 1000);
+    const max_dev: shared.types.Price = @intCast(@divTrunc(@as(i128, index_px) * 5, 1000));
     if (mid > index_px) {
         const diff = mid - index_px;
         return index_px + @min(diff, max_dev);

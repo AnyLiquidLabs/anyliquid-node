@@ -2,11 +2,11 @@ const std = @import("std");
 const shared = @import("../../shared/mod.zig");
 
 pub const MAX_SUB_ACCOUNTS: u8 = 20;
-pub const USDC: u128 = 1_000_000;
-pub const BTC: u128 = 100_000_000;
-pub const ETH: u128 = 1_000_000_000_000_000_000;
-pub const HYPE: u128 = 1_000_000_000_000_000_000;
-pub const SOL: u128 = 1_000_000_000;
+pub const USDC: u64 = 1_000_000;
+pub const BTC: u64 = 100_000_000;
+pub const ETH: u64 = 1_000_000_000;
+pub const HYPE: u64 = 1_000_000_000;
+pub const SOL: u64 = 1_000_000_000;
 
 pub const InstrumentId = u32;
 pub const AssetId = u64;
@@ -89,11 +89,11 @@ pub const Position = struct {
 
     pub fn unrealizedPnl(self: Position, mark_px: shared.types.Price) shared.types.SignedAmount {
         if (self.size == 0) return 0;
-        const diff: i256 = if (self.side == .long)
-            @as(i256, @intCast(mark_px)) - @as(i256, @intCast(self.entry_price))
+        const diff: i128 = if (self.side == .long)
+            @as(i128, mark_px) - @as(i128, self.entry_price)
         else
-            @as(i256, @intCast(self.entry_price)) - @as(i256, @intCast(mark_px));
-        return @intCast(@divTrunc(diff * @as(i512, @intCast(self.size)), shared.types.PRICE_SCALE));
+            @as(i128, self.entry_price) - @as(i128, mark_px);
+        return @intCast(@divTrunc(diff * @as(i128, @intCast(self.size)), shared.types.PRICE_SCALE));
     }
 
     pub fn isExpired(self: Position, now_ms: i64) bool {

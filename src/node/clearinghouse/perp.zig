@@ -171,9 +171,9 @@ fn applyPerpFill(fill: types.Fill, sub: *account.SubAccount, is_taker: bool) !vo
         const incoming_side: shared.types.Side = if (fill.taker_is_buy == is_taker) .long else .short;
         if (pos.side == incoming_side) {
             const total_size = pos.size + fill.size;
-            const old_weighted_price = @as(u512, @intCast(pos.entry_price)) * @as(u512, @intCast(pos.size));
-            const new_weighted_price = @as(u512, @intCast(fill.price)) * @as(u512, @intCast(fill.size));
-            pos.entry_price = @intCast((old_weighted_price + new_weighted_price) / @as(u512, @intCast(total_size)));
+            const old_weighted_price = @as(i128, pos.entry_price) * @as(i128, @intCast(pos.size));
+            const new_weighted_price = @as(i128, fill.price) * @as(i128, @intCast(fill.size));
+            pos.entry_price = @intCast(@divTrunc(old_weighted_price + new_weighted_price, @as(i128, @intCast(total_size))));
             pos.size = total_size;
             pos.leverage = requested_leverage;
         } else {
@@ -203,11 +203,11 @@ fn validateRequestedLeverage(leverage: u8, max_leverage: u8) !void {
 }
 
 fn calcPnl(pos: *const types.Position, close_size: shared.types.Quantity, close_price: shared.types.Price) shared.types.SignedAmount {
-    const diff: i256 = if (pos.side == .long)
-        @as(i256, @intCast(close_price)) - @as(i256, @intCast(pos.entry_price))
+    const diff: i128 = if (pos.side == .long)
+        @as(i128, close_price) - @as(i128, pos.entry_price)
     else
-        @as(i256, @intCast(pos.entry_price)) - @as(i256, @intCast(close_price));
-    return @intCast(@divTrunc(diff * @as(i512, @intCast(close_size)), shared.types.PRICE_SCALE));
+        @as(i128, pos.entry_price) - @as(i128, close_price);
+    return @intCast(@divTrunc(diff * @as(i128, @intCast(close_size)), shared.types.PRICE_SCALE));
 }
 
 const FUNDING_INDEX_SCALE: i64 = 1_000_000_000;
@@ -218,7 +218,7 @@ fn rateToFundingIndex(rate: f64) i64 {
 
 fn fundingPayment(notional: shared.types.Quantity, delta_index: i64) shared.types.Quantity {
     const abs_delta: u64 = @intCast(if (delta_index < 0) -delta_index else delta_index);
-    return @intCast((@as(u512, notional) * abs_delta) / @as(u64, FUNDING_INDEX_SCALE));
+    return @intCast(@divTrunc(@as(u128, notional) * abs_delta, @as(u128, @intCast(FUNDING_INDEX_SCALE))));
 }
 
 fn priceToF64(price: shared.types.Price) f64 {
